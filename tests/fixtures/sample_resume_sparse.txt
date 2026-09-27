@@ -1,0 +1,16 @@
+Alex Chen
+Email: alex.chen@example.com | GitHub: alexchen-dev
+
+EDUCATION
+University of Washington — B.S. Computer Science | 2022 – 2026
+
+TECHNICAL SKILLS
+Python, JavaScript, SQLite, Git
+
+PROJECTS
+TaskTrack — Minimalist Task Tracker
+- Developed a lightweight task management CLI in Python with SQLite persistence.
+- Implemented deadline sorting and JSON export for task histories.
+
+WeatherFetch — Simple Forecast Script
+- Built a Python CLI script fetching real-time weather forecasts via OpenWeatherMap REST API.

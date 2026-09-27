@@ -1,0 +1,30 @@
+Alex Rivers
+Staff Distributed Systems Engineer
+Email: alex.rivers@example.com | GitHub: alexrivers | Location: Seattle, WA
+
+PROFESSIONAL SUMMARY
+Systems architect with 8+ years building mission-critical distributed data infrastructure, consensus engines, and real-time streaming pipelines.
+
+EXPERIENCE
+Acme Cloud Infrastructure (2022 - Present)
+Lead Infrastructure Engineer
+- Architected high-throughput Kafka streaming pipeline processing 100k events/sec with 99.99% availability.
+- Decreased end-to-end event latency by 45% (from 450ms down to 40ms) using custom partitioning logic and ring buffer consumers.
+- Designed distributed rate limiter handling 1.2M requests/min with Redis cluster and token bucket algorithm.
+
+Datacore Labs (2019 - 2022)
+Senior Backend Engineer
+- Rebuilt core search indexing pipeline using Go and Elasticsearch, cutting query P99 latency by 60%.
+- Migrated legacy monolithic services to gRPC microservices with mutual TLS and circuit breakers.
+
+PROJECTS
+raft-kv-go
+- Developed a distributed consensus key-value store implementing Raft from scratch in Go.
+- Implemented log compaction, snapshotting, and dynamic membership changes.
+
+SIMD-Vector-Index
+- High-performance vector similarity search engine implemented in C++20 using AVX2 instructions.
+
+TECHNICAL SKILLS
+- Languages: Go, Python, C++, Rust, SQL
+- Distributed Systems: Kafka, Raft, gRPC, Redis, Cassandra, Kubernetes

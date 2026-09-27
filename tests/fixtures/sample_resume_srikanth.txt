@@ -1,0 +1,53 @@
+SRIKANTH BHUKYA
+Rayaparthy, Warangal, 506314, Telangana. | Phone: 9502016481 | Email: bhukyasrikanth124@gmail.com
+LinkedIn: Srikanth Bhukya | LinkedIn | GitHub: Shrikanth70 (Shrikanth)
+
+PROFESSIONAL SUMMARY
+Aspiring Software Developer skilled in Python, JavaScript, machine learning, and full‑stack development. Experienced in building scalable AI-powered applications, REST APIs, and interactive frontend interfaces. Strong foundation in data structures, algorithms, and modern web development frameworks.
+
+TECHNICAL SKILLS
+- Programming: Python, JavaScript, SQL, HTML, CSS
+- Frameworks & Tools: React.js, Node.js, Express.js, TailwindCSS, Streamlit, Git, REST APIs
+- Databases: MongoDB, MySQL
+- AI & ML: Machine Learning, NLP, Recommendation Systems, Data Analysis
+- Data Tools: Power BI, Data Visualization
+- Core CS: OOP, Data Structures, Algorithms, System Design Basics
+
+EXPERIENCE
+AICTE Rural Internship — Frontend Developer( AGEWELL — Elder Care Service Platform ) June 2025 – December 2025
+- Contributed to frontend development for a full‑stack platform connecting senior citizens with verified caretakers
+- Implemented responsive UI components improving accessibility and ease of use
+- Collaborated with backend teams to integrate service management, user profiles, and secure hiring workflows
+- Tested and optimized frontend features for performance across devices
+
+PROJECTS
+MovieBuddy — AI Movie Recommendation Platform
+Python, NLP, Streamlit, TMDB API, OMDb API
+- Developed an AI-based content recommendation system using similarity algorithms and NLP techniques
+- Processed thousands of movie records using Python for dynamic personalized suggestions
+- Built an interactive Streamlit UI integrating TMDB/OMDb APIs for real-time movie details, ratings, metadata, and OTT trends
+
+StudyBuddy AI — AI Learning Assistant
+React.js, TailwindCSS, Vite, Node.js, Express.js, MongoDB, Gemini API, JWT
+- Built a full‑stack AI learning platform that generates quizzes, flashcards, and study notes using Gemini API models
+- Developed scalable REST APIs using Express.js and MongoDB for user authentication and content management
+- Implemented a responsive React interface with secure JWT-based login and persistent session handling
+
+Chintu — AI Voice Assistant
+Python, Speech Recognition, NLP
+- Built a Python-based voice assistant capable of executing commands and performing web search
+- Integrated speech recognition and NLP pipelines for conversational interaction
+- Automated tasks like launching applications, fetching information, and system control
+
+EDUCATION
+Chaitanya Bharathi Institute of Technology, Gandipet — B.E (CSE) | 2023 – 2027 | CGPA: 8.99
+Narayana Junior College, Annojiguda — Intermediate | 2021 – 2023 | Score: 972/1000 (T.G.B.I.E)
+Telangana State Model School, Gurthur — Secondary Education| 2016 – 2021 | GPA: 10/10
+
+LEADERSHIP & ACTIVITIES
+- Joint Secretary, Ramanujan Maths Club — Conducted sessions, workshops, and academic events
+- Hackathon Participant, COSC Club — Built rapid prototype under time constraints
+- Creative Media Contributor — Designed videos and digital content for academic/technical events
+
+LANGUAGES
+English, Hindi, Telugu
