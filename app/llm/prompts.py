@@ -31,17 +31,19 @@ YOUR CORE MISSION & ANTI-CHEATING MANDATE:
 - Candidates cheat or rely on AI generation when an interview has a predictable rhythm (such as: question -> follow-up -> question -> follow-up). You MUST eliminate any perceptible pattern.
 - Questioning should be NON-LINEAR and RANDOM: jump dynamically across resume claims, GitHub repositories, and claimed skills. You can ask two resume claims in a row, jump straight from resume to GitHub with NO follow-up, or probe a skill anchor out of the blue.
 
-FOLLOW-UPS ARE CONDITIONAL ON ANSWER POTENTIAL ONLY — NEVER AUTOMATIC:
-- DO NOT routinely follow up after every question.
-- Apply follow-ups SYMMETRICALLY to any source (GitHub repos, resume claims, or skill anchors) ONLY when a "key point" warrants it:
-  1. A named technology or tool not previously explored.
-  2. A quantifiable claim (number, percentage, latency, scale).
-  3. A vague, shallow, or buzzword-heavy response.
-  4. An unelaborated design decision or architectural trade-off.
-- IF an answer was THOROUGH, CONCRETE, and CONVINCING: DO NOT ask a follow-up. Acknowledge the depth and IMMEDIATELY pivot to a completely different claim or repo to test if depth holds across their entire profile.
+FOLLOW-UPS ARE DRIVEN BY ANSWER KEY POINTS:
+- Never follow up automatically, but DO ask a follow-up (turn_type='follow_up') whenever the candidate's response presents a key point worth probing:
+  1. A named technology, framework, or tool mentioned that has not been deeply explored (e.g. LangGraph, FAISS, Socket.IO, Redis, Goroutines, WebSockets).
+  2. A quantifiable claim or metric (e.g. 'improved by 25%', 'reduced latency to 40ms', '20+ concurrent users').
+  3. An architectural trade-off or design decision mentioned without deep justification.
+  4. A vague, evasive, or textbook answer that lacks hands-on code specifics.
+- Symmetrical: Follow-ups apply equally after a resume question, a GitHub project question, or a skill-anchored question.
+- Avoid over-drilling: Ask at most 1 or 2 follow-ups on the same project before pivoting to a new topic or the other source.
+- When an answer has addressed all trade-offs and leaves no remaining key points, pivot immediately across sources (resume <-> github).
 
 SOFT GUARDRAILS:
 - Do not switch sources on every single turn for more than 2 consecutive turns (avoid whiplash), and never remain on one source for the entire interview session.
+- If the candidate has public GitHub repositories, you MUST explore them during the interview session (do not stay on the resume alone).
 - Never repeat a topic or claim that has already been explored in covered_refs.
 - When the interview approaches its conclusion or turn limit, transition gracefully to a closing turn.
 
@@ -137,29 +139,57 @@ def format_covered_refs(covered_refs: List[Dict[str, Any]]) -> str:
 
 
 def calculate_source_nudge(
-    transcript: List[Dict[str, Any]], max_consecutive: int = 3
+    transcript: List[Dict[str, Any]],
+    max_consecutive: int = 3,
+    has_github: bool = True,
 ) -> Optional[str]:
-    """Generates soft boundary nudges for anti-monologue without creating fixed cadences."""
+    """Generates boundary guidance to ensure multi-source coverage and prevent monologues."""
     interviewer_turns = [
         t for t in transcript if t.get("role") == "interviewer" and t.get("meta")
     ]
-    if len(interviewer_turns) < max_consecutive:
+    if not interviewer_turns:
         return None
 
     sources = [
         t["meta"].get("source") for t in interviewer_turns if t["meta"].get("source")
     ]
+    turn_types = [
+        t["meta"].get("turn_type") for t in interviewer_turns if t["meta"].get("turn_type")
+    ]
 
-    # Anti-monologue: only nudge if stuck on a single source for >= max_consecutive turns
+    last_turn_type = turn_types[-1] if turn_types else ""
+    github_turns_count = sum(1 for s in sources if s == "github")
+
+    # If the candidate has GitHub repositories and we have reached turn 3+ with ZERO GitHub turns, mandate a GitHub pivot!
+    if has_github and github_turns_count == 0 and len(interviewer_turns) >= 2:
+        return (
+            "MANDATORY GITHUB EXPLORATION MANDATE:\n"
+            "You have spent multiple turns on the resume and have NOT yet asked about the candidate's GitHub portfolio. "
+            "To verify public code and avoid a resume-only interview, your NEXT question MUST target one of the candidate's public repositories "
+            "from [SOURCE 2: GITHUB PROFILE & REPOSITORIES] above.\n"
+            "Requirements:\n"
+            "- Set source='github'\n"
+            "- Set turn_type='context_switch' or 'github_project'\n"
+            "- Explicitly name the repository and inquire into its architecture, concurrency, or data structures."
+        )
+
+    # If the previous turn was already skill_anchored, do not repeat skill_anchored immediately
+    if last_turn_type == "skill_anchored":
+        return (
+            "DIVERSITY MANDATE: You just asked a skill-anchored inquiry. Do NOT ask another skill-anchored question back-to-back. "
+            "Either follow up on the candidate's response (turn_type='follow_up') or pivot to a concrete project or repository (turn_type='context_switch')."
+        )
+
+    # Anti-monologue: if stuck on a single source for >= max_consecutive turns
     if len(sources) >= max_consecutive:
         recent_sources = sources[-max_consecutive:]
         if len(set(recent_sources)) == 1:
             current_source = recent_sources[0]
-            alt_source = "github" if current_source == "resume" else "resume"
+            alt_source = "github" if current_source == "resume" and has_github else "resume"
             return (
-                f"SOFT NUDGE: The last {max_consecutive} questions have all been from {current_source}. "
-                f"Consider probing an uncovered item from {alt_source} or a skill_anchored inquiry unless "
-                f"the candidate's last answer was clearly evasive and requires an immediate follow-up."
+                f"SOURCE ROTATION MANDATE: The last {max_consecutive} questions have all been sourced from {current_source}. "
+                f"You MUST now pivot to an uncovered item from {alt_source} to test breadth across their background. "
+                f"Set source='{alt_source}' and turn_type='context_switch'."
             )
 
     return None

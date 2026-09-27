@@ -190,22 +190,36 @@ def extract_deterministic_fallback_target(resume_text: str, covered_refs: Option
             ref_str = r.get("ref", "") if isinstance(r, dict) else getattr(r, "ref", "")
             covered_lower.append(str(ref_str).lower())
 
+    SECTION_HEADER_BLACKLIST = {
+        "technical skills", "skills", "technologies", "core competencies",
+        "tools", "programming languages", "languages", "frameworks",
+        "databases", "experience", "work history", "education", "projects",
+        "leadership", "activities", "certifications", "summary"
+    }
+
     lines = [line.strip() for line in resume_text.splitlines() if line.strip()]
 
     # Priority 1: Look for skills line
     for line in lines:
         lower = line.lower()
         if any(k in lower for k in ["skills", "technologies", "competencies", "tools"]):
-            clean = re.sub(r"^[-*•\d\.\)]\s*", "", line)
+            clean = re.sub(r"^[-*•\d\.\)]\s*", "", line).strip()
             if ":" in clean:
-                clean = clean.split(":", 1)[1]
+                clean = clean.split(":", 1)[1].strip()
+            elif clean.lower() in SECTION_HEADER_BLACKLIST:
+                continue
             skills = [s.strip() for s in re.split(r"[,|•;/]", clean) if s.strip()]
             for s in skills:
+                if s.lower() in SECTION_HEADER_BLACKLIST or len(s.split()) > 4:
+                    continue
                 if len(s) > 1 and len(s) < 30 and not any(s.lower() in cov for cov in covered_lower):
                     return s, f"Skills Section: {s}"
 
     # Priority 2: Look for experience or project bullet
     for line in lines:
+        clean_line = re.sub(r"^[-*•–\d\.\)]\s*", "", line).strip()
+        if clean_line.lower() in SECTION_HEADER_BLACKLIST:
+            continue
         if line.startswith(("-", "*", "•", "–")) and len(line) > 20:
             clean = re.sub(r"^[-*•–\d\.\)]\s*", "", line).strip()
             # Check if not covered

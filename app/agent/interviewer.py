@@ -205,8 +205,15 @@ class InterviewerAgent:
             )
         else:
             # Check source nudge
+            has_github_repos = bool(
+                state.github_summary
+                and isinstance(state.github_summary, dict)
+                and state.github_summary.get("repos")
+            )
             transcript_dict = [t.model_dump() for t in state.transcript]
-            nudge = calculate_source_nudge(transcript_dict, max_consecutive=3)
+            nudge = calculate_source_nudge(
+                transcript_dict, max_consecutive=3, has_github=has_github_repos
+            )
             if nudge:
                 instructions.append(nudge)
 
@@ -223,20 +230,18 @@ class InterviewerAgent:
                 )
             else:
                 instructions.append(
-                    "DECIDE_NEXT ANTI-CHEATING & UNPREDICTABLE QUESTIONING MANDATE:\n"
-                    "1. STOP CHEATING & ELIMINATE REPEATING PATTERNS: Never follow a predictable formula like "
-                    "'resume + follow-up -> github + follow-up -> skill + follow-up'. Candidates anticipate this cadence. "
-                    "Questioning must be random, non-linear, and varied across sources and projects.\n"
-                    "2. FOLLOW-UPS CONDITIONAL ON ANSWER POTENTIAL ONLY: Never automatically ask a follow-up after every question. "
-                    "Evaluate the candidate's last response:\n"
-                    "   - IF THOROUGH & SUBSTANTIATED: DO NOT follow up! Acknowledge briefly and immediately pivot to an entirely "
-                    "different claim, GitHub repo, or skill anchor to test if depth holds across their entire profile.\n"
-                    "   - IF VAGUE, SHALLOW, EVASIVE, OR TEXTBOOK BUZZWORDS: ONLY THEN use turn_type='follow_up' to drill into "
-                    "concrete architecture, trade-offs, code internals, or failure modes.\n"
-                    "3. SYMMETRICAL APPLICATION: Follow-ups are equally available for resume claims, GitHub repositories, and skill "
-                    "anchors, but strictly triggered by answer quality rather than source type.\n"
-                    "4. RANDOM JUMPS & SKILL ANCHORS: You may jump from resume directly to GitHub with no follow-up, ask two consecutive "
-                    "resume questions on distinct projects, or suddenly probe a skill claim (turn_type='skill_anchored') out of the blue."
+                    "DECIDE_NEXT QUESTIONING & MULTI-SOURCE MANDATE:\n"
+                    "1. MULTI-SOURCE COVERAGE (RESUME & GITHUB): A complete technical interview MUST probe BOTH the candidate's uploaded resume AND their public GitHub repositories. Do not stay on resume claims or general skill questions for the entire interview.\n"
+                    "2. FOLLOW-UP DECISION (DRIVEN BY KEY POINTS): Never follow up mechanically, but DO ask a follow-up (turn_type='follow_up') when the candidate's last answer presents a concrete key point:\n"
+                    "   - A named technology, framework, algorithm, or library mentioned in their answer that has not been deeply probed (e.g. LangGraph, FAISS, CrewAI, Socket.IO, Redis, Goroutines, WebSockets).\n"
+                    "   - A quantifiable metric or scale claim (e.g. 'improved accuracy by 25%', 'reduced latency to 40ms', '20+ concurrent users').\n"
+                    "   - An architectural trade-off or design decision mentioned without deep justification.\n"
+                    "   - An evasive, vague, or textbook recitation that lacks hands-on code specifics.\n"
+                    "   In any of these cases, use turn_type='follow_up' to probe that exact detail.\n"
+                    "3. PIVOTING & DYNAMIC CONTEXT SWITCHING:\n"
+                    "   - Avoid asking more than 1 or 2 consecutive follow-ups on the same topic.\n"
+                    "   - When an answer has addressed all trade-offs or when switching context, pivot to an uncovered repository from [SOURCE 2: GITHUB PROFILE & REPOSITORIES] (set source='github', turn_type='context_switch') or to an uncovered resume achievement.\n"
+                    "   - Do NOT ask consecutive skill-anchored questions back-to-back."
                 )
 
         instructions.append(
