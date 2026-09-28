@@ -224,6 +224,7 @@ class InterviewerAgent:
                     "Start the interview with a polite, professional welcome note that frames the technical inquiry around one real skill, project, or claim found in their uploaded resume.\n"
                     "Required pattern: 'Welcome! Looking over your experience and background, you highlighted [insert one real project, skill, or achievement directly from their uploaded resume]. [Walk me through / Can you walk me through (concrete technical inquiry probing that project or skill)]?'\n"
                     "GROUNDING MANDATE: The project, skill, or metric referenced MUST come 100% from the uploaded document in the CANDIDATE DOSSIER above. Never use made-up or template examples.\n"
+                    "DO NOT COPY FEW-SHOT EXAMPLES: Under no circumstances should you cite Apache Kafka, 450ms latency, or any project from the few-shot calibration examples unless it appears verbatim in the uploaded resume!\n"
                     "ORDERING MANDATE: Turn 1 MUST have source='resume'. Do not ask about GitHub projects on Turn 1.\n"
                     "1-TO-1 CONSISTENCY: 'source_ref' MUST match the EXACT project or claim targeted in your question.\n"
                     "DOMAIN RELEVANCE: Ask only about technical concepts that genuinely belong to the targeted project."
@@ -233,11 +234,12 @@ class InterviewerAgent:
                     "DECIDE_NEXT QUESTIONING & MULTI-SOURCE MANDATE:\n"
                     "1. MULTI-SOURCE COVERAGE (RESUME & GITHUB): A complete technical interview MUST probe BOTH the candidate's uploaded resume AND their public GitHub repositories. Do not stay on resume claims or general skill questions for the entire interview.\n"
                     "2. FOLLOW-UP DECISION (DRIVEN BY KEY POINTS): Never follow up mechanically, but DO ask a follow-up (turn_type='follow_up') when the candidate's last answer presents a concrete key point:\n"
-                    "   - A named technology, framework, algorithm, or library mentioned in their answer that has not been deeply probed (e.g. LangGraph, FAISS, CrewAI, Socket.IO, Redis, Goroutines, WebSockets).\n"
+                    "   - A named technology, framework, algorithm, or library explicitly mentioned in their answer that has not been deeply probed.\n"
                     "   - A quantifiable metric or scale claim (e.g. 'improved accuracy by 25%', 'reduced latency to 40ms', '20+ concurrent users').\n"
                     "   - An architectural trade-off or design decision mentioned without deep justification.\n"
                     "   - An evasive, vague, or textbook recitation that lacks hands-on code specifics.\n"
                     "   In any of these cases, use turn_type='follow_up' to probe that exact detail.\n"
+                    "   STRICT FOLLOW-UP MANDATE: You must NEVER invent or attribute technologies to the candidate that they did not explicitly mention! If the candidate discussed Redis and Lua scripts, follow up on Redis or Lua; NEVER claim they mentioned Go, Goroutines, or other technologies not in their text.\n"
                     "3. PIVOTING & DYNAMIC CONTEXT SWITCHING:\n"
                     "   - Avoid asking more than 1 or 2 consecutive follow-ups on the same topic.\n"
                     "   - When an answer has addressed all trade-offs or when switching context, pivot to an uncovered repository from [SOURCE 2: GITHUB PROFILE & REPOSITORIES] (set source='github', turn_type='context_switch') or to an uncovered resume achievement.\n"
@@ -301,6 +303,7 @@ class InterviewerAgent:
             resume_text=state.resume_text,
             github_summary=state.github_summary,
             transcript=state.transcript,
+            question=turn_output.question,
         )
 
         if ordering_violated or not grounded:
@@ -336,6 +339,7 @@ class InterviewerAgent:
                     resume_text=state.resume_text,
                     github_summary=state.github_summary,
                     transcript=state.transcript,
+                    question=retry_turn.question,
                 )
 
                 if not retry_ordering_violated and retry_grounded:

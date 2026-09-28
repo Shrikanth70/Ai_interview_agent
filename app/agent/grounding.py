@@ -30,6 +30,32 @@ def normalize_tokens(text: str) -> List[str]:
     return cleaned
 
 
+def is_token_in_text(tok: str, text: str) -> bool:
+    """Checks whether a token exists in text as a distinct word or identifier (case-insensitive).
+    Prevents false positive substring matches (e.g. 'go' matching inside 'mongodb' or 'algorithm').
+    """
+    if not tok or not text:
+        return False
+    tok_clean = tok.strip().lower()
+    text_clean = text.lower()
+
+    pattern_parts = []
+    if re.match(r"^\w", tok_clean):
+        pattern_parts.append(r"(?<![a-zA-Z0-9_])")
+    pattern_parts.append(re.escape(tok_clean))
+    if re.match(r".*\w$", tok_clean):
+        pattern_parts.append(r"(?![a-zA-Z0-9_])")
+    else:
+        pattern_parts.append(r"(?:\s|[.,;!?\'\"\)\]\n]|\Z)")
+
+    pattern = "".join(pattern_parts)
+    if re.search(pattern, text_clean):
+        return True
+    if len(tok_clean) >= 5 and tok_clean in text_clean:
+        return True
+    return False
+
+
 def extract_github_blob(github_summary: Dict[str, Any]) -> str:
     """Consolidates all text from the candidate's GitHub summary into a single searchable blob."""
     parts: List[str] = []
@@ -56,6 +82,68 @@ def extract_github_blob(github_summary: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def validate_question_assumptions(
+    question: str,
+    turn_type: str,
+    resume_text: str,
+    github_summary: Dict[str, Any],
+    transcript: Optional[List[Any]] = None,
+) -> Tuple[bool, str]:
+    """Scans the generated question for ungrounded architectural or domain assumptions.
+
+    Catches fabricated surrounding context like 'in your real-time data pipeline'
+    when neither the resume, the GitHub project, nor candidate answers mention such a pipeline.
+    """
+    if not question:
+        return True, "question text is empty"
+
+    if turn_type == "closing":
+        return True, "closing turn requires no assumption check"
+
+    # Build reference text corpus of established facts
+    candidate_answers = []
+    if transcript:
+        candidate_answers = [
+            t.content if hasattr(t, "content") else t.get("content", "")
+            for t in transcript
+            if (hasattr(t, "role") and t.role == "candidate") or (isinstance(t, dict) and t.get("role") == "candidate")
+        ]
+    answers_blob = " ".join(candidate_answers)
+    established_corpus = f"{resume_text} {extract_github_blob(github_summary)} {answers_blob}".lower()
+
+    # Pattern: 'in your <phrase>' or 'for your <phrase>' or 'within your <phrase>'
+    assumption_patterns = [
+        r"\b(?:in|for|within|during)\s+your\s+([a-zA-Z0-9_\-\.\'\" ]{3,60}?)(?:,|\.|\?|\band\b|\bwhere\b|\bwhen\b|\bhow\b|\bwith\b|\bto\b|\bwhich\b)",
+        r"\b(?:part of your)\s+([a-zA-Z0-9_\-\.\'\" ]{3,60}?)(?:,|\.|\?|\band\b)",
+    ]
+
+    GENERIC_CONTEXT_WORDS = {
+        "experience", "project", "projects", "work", "background", "implementation",
+        "system", "systems", "solution", "solutions", "architecture", "code", "application",
+        "service", "services", "career", "role", "team", "previous", "recent", "time",
+        "repository", "repo", "repos", "engineering"
+    }
+
+    for pat in assumption_patterns:
+        matches = re.finditer(pat, question, flags=re.IGNORECASE)
+        for m in matches:
+            phrase = m.group(1).strip()
+            tokens = normalize_tokens(phrase)
+            substantive = [t for t in tokens if t not in GENERIC_CONTEXT_WORDS and len(t) > 2]
+
+            # If the phrase introduces specific architectural/domain claims (e.g. 'real-time data pipeline')
+            # verify that at least one substantive token is established in the corpus
+            if substantive:
+                matched = [tok for tok in substantive if is_token_in_text(tok, established_corpus)]
+                if not matched:
+                    return False, (
+                        f"unsupported context assumption: question assumed '{phrase}' (keywords {substantive}), "
+                        f"which was never established in the candidate's resume, GitHub projects, or prior answers"
+                    )
+
+    return True, "question assumptions verified"
+
+
 def is_source_ref_grounded(
     source_ref: str,
     source: str,
@@ -63,12 +151,24 @@ def is_source_ref_grounded(
     resume_text: str,
     github_summary: Dict[str, Any],
     transcript: Optional[List[Any]] = None,
+    question: Optional[str] = None,
 ) -> Tuple[bool, str]:
-    """Fuzzy-matches source_ref against the candidate's raw dossier to detect hallucinations.
+    """Fuzzy-matches source_ref and question assumptions against the candidate's raw dossier to detect hallucinations.
 
     Returns:
         (is_grounded: bool, reason: str)
     """
+    if question:
+        valid_q, q_reason = validate_question_assumptions(
+            question=question,
+            turn_type=turn_type,
+            resume_text=resume_text,
+            github_summary=github_summary,
+            transcript=transcript,
+        )
+        if not valid_q:
+            return False, q_reason
+
     if not source_ref or not source_ref.strip():
         return False, "source_ref is empty"
 
@@ -82,18 +182,54 @@ def is_source_ref_grounded(
     if turn_type == "follow_up" or clean_ref.lower().startswith("prior_answer") or clean_ref.lower().startswith("prior answer"):
         # Check against transcript history
         if transcript:
-            prior_text = " ".join([
-                t.content for t in transcript
-                if hasattr(t, "role") and t.role == "candidate" or (isinstance(t, dict) and t.get("role") == "candidate")
-            ])
-            ref_tokens = normalize_tokens(clean_ref)
+            prior_candidate_texts = [
+                t.content if hasattr(t, "content") else t.get("content", "")
+                for t in transcript
+                if (hasattr(t, "role") and t.role == "candidate") or (isinstance(t, dict) and t.get("role") == "candidate")
+            ]
+            if not prior_candidate_texts:
+                return False, "follow-up reference generated but transcript contains no prior candidate answers"
+
+            candidate_corpus = " ".join(prior_candidate_texts)
+
+            # Clean off prefix like 'prior_answer:' or 'prior answer:'
+            followup_subject = re.sub(r"^prior[_ ]answer:?\s*", "", clean_ref, flags=re.IGNORECASE).strip()
+            followup_subject = followup_subject.strip("'\"`()[]")
+            ref_tokens = normalize_tokens(followup_subject)
+            if not ref_tokens:
+                ref_tokens = [w.lower() for w in re.findall(r"\w+", followup_subject) if len(w) > 2]
+
             if not ref_tokens:
                 return True, "follow_up reference contains standard anchor"
-            # If any substantive token from source_ref matches prior answer or resume/github, it's valid
-            dossier_text = (resume_text + " " + extract_github_blob(github_summary) + " " + prior_text).lower()
-            matched = [tok for tok in ref_tokens if tok in dossier_text]
-            if matched:
-                return True, f"follow_up matched prior context tokens: {matched[:3]}"
+
+            # Check if any substantive keyword from the follow-up exists in candidate's answers as a whole word
+            matched_in_answers = [tok for tok in ref_tokens if is_token_in_text(tok, candidate_corpus)]
+
+            # Also check if it matches the current topic/project being discussed in the last interviewer turn
+            last_interviewer_turn = next(
+                (t for t in reversed(transcript) if (hasattr(t, "role") and t.role == "interviewer") or (isinstance(t, dict) and t.get("role") == "interviewer")),
+                None
+            )
+            interviewer_context = ""
+            if last_interviewer_turn:
+                content = last_interviewer_turn.content if hasattr(last_interviewer_turn, "content") else last_interviewer_turn.get("content", "")
+                meta_ref = ""
+                if hasattr(last_interviewer_turn, "meta") and last_interviewer_turn.meta:
+                    meta_ref = getattr(last_interviewer_turn.meta, "source_ref", "")
+                elif isinstance(last_interviewer_turn, dict) and "meta" in last_interviewer_turn:
+                    meta_ref = last_interviewer_turn["meta"].get("source_ref", "")
+                interviewer_context = f"{content} {meta_ref}"
+
+            matched_in_context = [tok for tok in ref_tokens if is_token_in_text(tok, interviewer_context)]
+
+            if matched_in_answers or matched_in_context:
+                matched_all = list(set(matched_in_answers + matched_in_context))
+                return True, f"follow_up verified against conversation context (matched: {matched_all[:3]})"
+
+            return False, (
+                f"hallucination detected: follow-up topic '{followup_subject}' (keywords {ref_tokens}) "
+                f"was never mentioned in candidate's answer or the preceding discussion"
+            )
         return True, "follow_up reference accepted"
 
     # 3. Determine target text corpus based on source
@@ -136,12 +272,11 @@ def is_source_ref_grounded(
     if not tokens:
         return False, f"source_ref '{source_ref}' has no substantive keywords"
 
-    # Check token presence in target text
+    # Check token presence in target text with whole-word boundary
     matched_tokens = []
     missing_tokens = []
     for tok in tokens:
-        # Check whole word or significant substring in target
-        if tok in target_text:
+        if is_token_in_text(tok, target_text):
             matched_tokens.append(tok)
         else:
             # Check SequenceMatcher against words in target

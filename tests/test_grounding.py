@@ -399,3 +399,120 @@ async def test_multi_turn_simulated_sessions_across_all_fixtures(
         assert len(all_turns) >= 3
 
     app.dependency_overrides.clear()
+
+
+def test_follow_up_grounding_rejects_hallucinated_technologies():
+    """Verify that a follow-up claiming 'prior_answer: Experience with Go' is rejected
+    when the candidate's answer discussed Redis/Lua and never mentioned Go.
+    """
+    resume_with_mongo = "Technical Skills: MongoDB, MySQL, Python, Redis. Experience in database optimization."
+    
+    transcript = [
+        {
+            "role": "interviewer",
+            "content": "Welcome! Looking over your experience and background, you highlighted your work with MongoDB. Walk me through a challenging problem.",
+            "meta": {"source": "resume", "source_ref": "Skills Section: MongoDB", "turn_type": "skill_anchored"}
+        },
+        {
+            "role": "candidate",
+            "content": (
+                "I used a Lua script to ensure only the client that set the lock could release it. "
+                "The script checked if the stored value matched the client's unique identifier, and only then "
+                "executed a DEL on the key. This atomic check-and-delete prevented other clients from unlocking resources."
+            )
+        }
+    ]
+
+    # 1. Hallucinated follow-up claiming Go was mentioned in prior answer -> MUST FAIL
+    grounded, reason = is_source_ref_grounded(
+        source_ref="Prior answer: Experience with Go",
+        source="resume",
+        turn_type="follow_up",
+        resume_text=resume_with_mongo,
+        github_summary={},
+        transcript=transcript,
+    )
+    assert not grounded, f"Expected hallucinated Go follow-up to FAIL, but got: {reason}"
+    assert "hallucination detected" in reason.lower()
+
+    # 2. Genuine follow-up probing Lua script / atomic delete from the actual answer -> MUST PASS
+    grounded, reason = is_source_ref_grounded(
+        source_ref="prior_answer: Lua script atomic check-and-delete",
+        source="resume",
+        turn_type="follow_up",
+        resume_text=resume_with_mongo,
+        github_summary={},
+        transcript=transcript,
+    )
+    assert grounded, f"Expected genuine Lua follow-up to PASS, but got: {reason}"
+
+    # 3. Word boundary check: 'go' as a standalone token must NOT match inside 'MongoDB'
+    grounded, reason = is_source_ref_grounded(
+        source_ref="Experience with Go",
+        source="resume",
+        turn_type="skill_anchored",
+        resume_text=resume_with_mongo,
+        github_summary={},
+    )
+    assert not grounded, f"Expected standalone 'Go' to not match inside 'MongoDB', but got: {reason}"
+
+
+def test_validate_question_assumptions_rejects_fabricated_pipeline_context():
+    """Verify that questions inventing unestablished surrounding architectures
+    (e.g., 'in your real-time data pipeline') are rejected even if source_ref looks valid.
+    """
+    resume_text = "Technical Skills: Python, Redis, SQL. Built distributed systems."
+    github_summary = {
+        "username": "testuser",
+        "repos": {
+            "redis-distributed-lock": {
+                "name": "redis-distributed-lock",
+                "description": "Distributed lock service using Redis SETNX and Lua scripts.",
+                "language": "Python",
+                "topics": ["redis", "concurrency"],
+                "readme_excerpt": "A fault-tolerant distributed locking library with auto-lease expiry.",
+            }
+        }
+    }
+    transcript = [
+        {
+            "role": "candidate",
+            "content": "I used a Lua script to ensure only the client that set the lock could release it."
+        }
+    ]
+
+    # 1. Hallucinated question assumption: 'in your real-time data pipeline' -> MUST BE REJECTED
+    fabricated_question = (
+        "Can you explain how you used Redis as a distributed lock service in your real-time data pipeline, "
+        "and how you handled the trade-off between lock acquisition latency and the number of concurrent locks?"
+    )
+    grounded, reason = is_source_ref_grounded(
+        source_ref="repo: redis-distributed-lock / lock acquisition latency",
+        source="github",
+        turn_type="follow_up",
+        resume_text=resume_text,
+        github_summary=github_summary,
+        transcript=transcript,
+        question=fabricated_question,
+    )
+    assert not grounded, f"Expected fabricated 'real-time data pipeline' question to FAIL, but got: {reason}"
+    assert "unsupported context assumption" in reason.lower()
+    assert "pipeline" in reason.lower()
+
+    # 2. Grounded question focusing strictly on documented architecture -> MUST PASS
+    grounded_question = (
+        "How did you handle lock acquisition under high concurrency in your Redis implementation, "
+        "and what trade-offs did you consider around acquisition latency and contention?"
+    )
+    grounded, reason = is_source_ref_grounded(
+        source_ref="repo: redis-distributed-lock / lock acquisition latency",
+        source="github",
+        turn_type="github_project",
+        resume_text=resume_text,
+        github_summary=github_summary,
+        transcript=transcript,
+        question=grounded_question,
+    )
+    assert grounded, f"Expected grounded question to PASS, but got: {reason}"
+
+
