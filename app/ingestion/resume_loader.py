@@ -81,7 +81,7 @@ def parse_resume_sections(cleaned_text: str) -> Dict[str, str]:
             re.IGNORECASE,
         ),
         "skills": re.compile(
-            r"^(skills|technical skills|technologies|core competencies|tools & technologies)",
+            r"^(skills|technical skills|technologies|core competencies|core skills|key skills|primary skills|technical competencies|tools & technologies|tools and technologies)",
             re.IGNORECASE,
         ),
         "summary": re.compile(

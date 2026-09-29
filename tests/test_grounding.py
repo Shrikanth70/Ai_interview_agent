@@ -16,6 +16,7 @@ from app.agent.grounding import (
     extract_deterministic_fallback_target,
     is_source_ref_grounded,
     normalize_tokens,
+    validate_question_assumptions,
 )
 from app.agent.interviewer import InterviewerAgent
 from app.session.state import SessionState
@@ -514,5 +515,383 @@ def test_validate_question_assumptions_rejects_fabricated_pipeline_context():
         question=grounded_question,
     )
     assert grounded, f"Expected grounded question to PASS, but got: {reason}"
+
+
+def test_deterministic_fallback_ignores_core_skills_header():
+    """Verify that extract_deterministic_fallback_target does not extract 'CORE SKILLS' as a skill."""
+    resume_with_core_skills = (
+        "Candidate Name\n"
+        "Software Engineer\n\n"
+        "CORE SKILLS\n"
+        "Python, Go, Docker, PostgreSQL\n\n"
+        "EXPERIENCE\n"
+        "- Built an async web service with FastAPI handling 5k req/s.\n"
+    )
+    from app.agent.grounding import extract_deterministic_fallback_target
+    target, ref = extract_deterministic_fallback_target(resume_with_core_skills)
+    assert target.lower() != "core skills", f"Target should not be 'CORE SKILLS', got: {target}"
+    assert "core skills" not in ref.lower(), f"Ref should not be 'CORE SKILLS', got: {ref}"
+    assert target in ["Python", "Go", "Docker", "PostgreSQL"] or "FastAPI" in target
+
+
+def test_follow_up_grounding_rejects_hallucinated_redis_in_memoization():
+    """Verify that a follow-up attributing Redis to a matrix pathfinding memoization answer is rejected."""
+    resume_text = "Software Engineer with Python experience. Technical Skills: Python, Redis, SQL."
+    transcript = [
+        {
+            "role": "interviewer",
+            "content": "Walk me through a challenging technical problem you solved and the primary architectural trade-offs you navigated.",
+            "meta": {"source": "resume", "source_ref": "General Claim", "turn_type": "skill_anchored"}
+        },
+        {
+            "role": "candidate",
+            "content": (
+                "I tackled a complex problem where I had to optimize recursive backtracking for matrix pathfinding "
+                "under strict time limits. The trade-off was between readability (clear recursion trees) and "
+                "performance (memoization with space overhead). I chose a hybrid approach—caching partial results "
+                "while keeping recursion for clarity—cutting runtime by nearly half without losing maintainability."
+            )
+        }
+    ]
+
+    # 1. Hallucinated follow-up claiming candidate used Redis in hybrid memoization approach -> MUST FAIL
+    hallucinated_question = (
+        "You mentioned a hybrid approach to optimize matrix pathfinding, caching partial results while keeping "
+        "recursion for clarity. Can you walk me through the Redis implementation details in your hybrid approach, "
+        "such as the specific Redis commands or data structures used?"
+    )
+    grounded, reason = is_source_ref_grounded(
+        source_ref="partial results caching with Redis",
+        source="resume",
+        turn_type="follow_up",
+        resume_text=resume_text,
+        github_summary={},
+        transcript=transcript,
+        question=hallucinated_question,
+    )
+    assert not grounded, f"Expected hallucinated Redis follow-up to FAIL, but got: {reason}"
+    assert any(w in reason.lower() for w in ["hallucination", "redis", "unsupported", "unmentioned"])
+
+    # 2. Genuine grounded follow-up on candidate's actual memoization caching -> MUST PASS
+    grounded_question = (
+        "You mentioned caching partial results while keeping recursion for clarity. Can you walk me through "
+        "how you structured the cache keys or memoization storage to prevent memory bloat during deep recursion?"
+    )
+    grounded, reason = is_source_ref_grounded(
+        source_ref="prior_answer: caching partial results memoization",
+        source="resume",
+        turn_type="follow_up",
+        resume_text=resume_text,
+        github_summary={},
+        transcript=transcript,
+        question=grounded_question,
+    )
+    assert grounded, f"Expected genuine memoization follow-up to PASS, but got: {reason}"
+
+
+def test_deterministic_fallback_ignores_location_and_employer_lines_arjun_reddy():
+    """Verify that extract_deterministic_fallback_target extracts a real skill (e.g. Python) and NEVER 'India' or employer names."""
+    resume_text = (
+        "ARJUN REDDY\n"
+        "Senior AI/ML Engineer\n\n"
+        "Hyderabad, India\n"
+        "Email: arjun.reddy.demo@example.com\n"
+        "GitHub: github.com/arjun-reddy-demo\n\n"
+        "------------------------------------------------------------\n"
+        "PROFESSIONAL SUMMARY\n"
+        "------------------------------------------------------------\n\n"
+        "Senior AI/ML Engineer with 6+ years of experience designing ML systems.\n\n"
+        "------------------------------------------------------------\n"
+        "CORE SKILLS\n"
+        "------------------------------------------------------------\n\n"
+        "Programming:\n"
+        "Python, Go, SQL, Bash, JavaScript, TypeScript\n\n"
+        "Machine Learning:\n"
+        "Scikit-learn, XGBoost, LightGBM\n\n"
+        "------------------------------------------------------------\n"
+        "PROFESSIONAL EXPERIENCE\n"
+        "------------------------------------------------------------\n\n"
+        "MACHINE LEARNING ENGINEER\n"
+        "DataSphere Technologies — Bengaluru, India\n"
+        "June 2021 – June 2023\n\n"
+        "- Developed machine learning models for customer behavior prediction.\n"
+    )
+    from app.agent.grounding import extract_deterministic_fallback_target
+    target, ref = extract_deterministic_fallback_target(resume_text)
+    assert target.lower() not in ["india", "bengaluru", "hyderabad", "datasphere technologies", "datasphere technologies — bengaluru"], f"Target extracted invalid geography/employer: {target}"
+    assert target in ["Python", "Go", "SQL", "Scikit-learn", "XGBoost", "LightGBM"]
+
+
+def test_validate_question_assumptions_rejects_hallucinated_metrics():
+    """Verify that questions containing fabricated numerical/latency metrics are rejected."""
+    resume_text = (
+        "ARJUN REDDY\n"
+        "Senior AI/ML Engineer\n\n"
+        "Experience:\n"
+        "- TechNova Solutions: Optimized inference pipelines and reduced average response latency by approximately 35%.\n"
+        "Projects:\n"
+        "- Real-Time Fraud Detection System: Used Kafka for event ingestion and Redis for low-latency feature access.\n"
+    )
+
+    # 1. Question containing hallucinated metrics (450ms, 40ms) -> MUST BE REJECTED
+    hallucinated_question = (
+        "Welcome! Looking over your experience and background, you highlighted optimizing an event pipeline with "
+        "Apache Kafka to reduce latency from 450ms down to 40ms. Can you walk me through the design decisions you made?"
+    )
+    valid, reason = validate_question_assumptions(
+        question=hallucinated_question,
+        turn_type="resume_claim",
+        resume_text=resume_text,
+        github_summary={},
+    )
+    assert not valid, f"Expected hallucinated 450ms/40ms metrics to be rejected, but got: {reason}"
+    assert any(term in reason.lower() for term in ["metric", "450ms", "40ms", "unsupported", "hallucinat"])
+
+    # 2. Question containing real metrics from resume (35%) -> MUST PASS
+    grounded_metric_question = (
+        "Welcome! Looking over your experience and background, you highlighted optimizing inference pipelines to "
+        "reduce average response latency by approximately 35%. Can you walk me through the caching and batching strategies you used?"
+    )
+    valid, reason = validate_question_assumptions(
+        question=grounded_metric_question,
+        turn_type="resume_claim",
+        resume_text=resume_text,
+        github_summary={},
+    )
+    assert valid, f"Expected genuine 35% metric to pass, but got rejection: {reason}"
+
+
+def test_validate_question_assumptions_rejects_hallucinated_assertions():
+    """Verify that questions asserting an action/tech combination not connected in resume are rejected."""
+    resume_text = (
+        "ARJUN REDDY\n"
+        "Senior AI/ML Engineer\n\n"
+        "Experience:\n"
+        "- TechNova Solutions: Optimized inference pipelines and reduced average response latency by approximately 35%.\n"
+        "Projects:\n"
+        "- Real-Time Fraud Detection System: Used Kafka for event ingestion and Redis for low-latency feature access.\n"
+    )
+
+    # Question asserts candidate optimized event pipelines with Kafka (which candidate never claimed)
+    hallucinated_assertion_question = (
+        "Welcome! Looking over your experience and background, you highlighted optimizing an event pipeline with "
+        "Apache Kafka. Can you walk me through the partitioning strategies you used?"
+    )
+    valid, reason = validate_question_assumptions(
+        question=hallucinated_assertion_question,
+        turn_type="resume_claim",
+        resume_text=resume_text,
+        github_summary={},
+    )
+    assert not valid, f"Expected ungrounded assertion to be rejected, but got: {reason}"
+    assert any(term in reason.lower() for term in ["assertion", "unsupported", "hallucinat", "kafka"])
+
+
+def test_is_source_ref_grounded_rejects_cross_bullet_chimera():
+    """Verify that source_refs combining disjoint tokens across separate jobs are rejected."""
+    resume_text = (
+        "ARJUN REDDY\n"
+        "Senior AI/ML Engineer\n\n"
+        "Experience:\n"
+        "- TechNova Solutions: Optimized inference pipelines and reduced average response latency by approximately 35%.\n\n"
+        "Projects:\n"
+        "- Real-Time Fraud Detection System: Used Kafka for event ingestion and Redis for low-latency feature access.\n"
+    )
+
+    # source_ref cherry-picks 'Kafka' from Projects and 'latency optimization' from Experience
+    chimera_ref = "Kafka event pipeline optimization (latency reduction)"
+    grounded, reason = is_source_ref_grounded(
+        source_ref=chimera_ref,
+        source="resume",
+        turn_type="resume_claim",
+        resume_text=resume_text,
+        github_summary={},
+    )
+    assert not grounded, f"Expected chimera source_ref to be rejected, but got passed: {reason}"
+    assert any(term in reason.lower() for term in ["hallucination", "co-occur", "disjoint", "span", "appear"])
+
+
+def test_prompts_free_of_leakage_entities():
+    """Verify that system prompt directives do not mention specific project names like MovieBuddy."""
+    from app.llm.prompts import MASTER_SYSTEM_PROMPT
+    assert "MovieBuddy" not in MASTER_SYSTEM_PROMPT, "Found concrete entity 'MovieBuddy' in MASTER_SYSTEM_PROMPT"
+
+
+def test_deterministic_fallback_on_arjun_reddy_never_extracts_senior_ai():
+    """Verify that fallback extraction on Arjun Reddy's resume extracts an actual bullet/project and never 'Senior AI'."""
+    resume_text = (
+        "ARJUN REDDY\n\n"
+        "Senior AI/ML Engineer\n\n"
+        "Hyderabad, India\n"
+        "Email: arjun.reddy.demo@example.com\n"
+        "Phone: +91 98765 43210\n"
+        "LinkedIn: linkedin.com/in/arjun-reddy-demo\n"
+        "GitHub: github.com/arjun-reddy-demo\n\n"
+        "PROFESSIONAL SUMMARY\n\n"
+        "Senior AI/ML Engineer with 6+ years of experience designing, developing, and deploying production-grade Machine Learning, Deep Learning, NLP, LLM, and Generative AI systems.\n\n"
+        "PROFESSIONAL EXPERIENCE\n\n"
+        "Senior AI/ML Engineer\n"
+        "TechNova Solutions Pvt. Ltd. — Hyderabad, India\n"
+        "July 2023 – Present\n\n"
+        "- Designed and developed production-grade Generative AI applications using LLMs, RAG pipelines, vector databases, and agentic workflows.\n"
+        "- Built a multi-stage RAG architecture combining document ingestion, chunking, embedding generation, hybrid retrieval, reranking, and LLM-based answer generation.\n"
+    )
+    from app.agent.grounding import extract_deterministic_fallback_target
+    target, ref = extract_deterministic_fallback_target(resume_text)
+    assert "senior ai" not in target.lower(), f"Target extracted job title fragment: {target}"
+    assert "senior ai" not in ref.lower(), f"Ref extracted job title fragment: {ref}"
+    assert "skills section" not in ref.lower(), f"Emitted Skills Section for resume without skills section: {ref}"
+
+
+def test_extract_candidate_anchors_finds_real_projects():
+    """Verify extract_candidate_anchors pulls real project names from the candidate dossier."""
+    resume_text = (
+        "ARJUN REDDY\n"
+        "Senior AI/ML Engineer\n\n"
+        "SELECTED PROJECTS\n\n"
+        "Enterprise Knowledge Assistant\n"
+        "Technology: Python, LangGraph, FastAPI, Qdrant\n"
+        "- Built an enterprise RAG assistant capable of answering questions.\n\n"
+        "Real-Time Fraud Detection System\n"
+        "Technology: Python, XGBoost, Kafka, Redis\n"
+        "- Developed a real-time fraud detection pipeline processing streaming transaction events.\n\n"
+        "AI Document Processing Platform\n"
+        "Technology: Python, PyTorch, Transformers\n"
+        "- Developed an automated document-processing pipeline.\n"
+    )
+    from app.agent.grounding import extract_candidate_anchors
+    anchors = extract_candidate_anchors(resume_text)
+    assert len(anchors) >= 2
+    assert "Enterprise Knowledge Assistant" in anchors
+    assert "Real-Time Fraud Detection System" in anchors
+
+
+def test_github_grounding_strictly_requires_repository_match():
+    """Verify that source='github' strictly requires matching a real repo and rejects fake repos matching generic words."""
+    github_summary = {
+        "profile": {
+            "login": "octocat",
+            "bio": "Systems Engineer and Distributed Systems Enthusiast at GitHub",
+            "html_url": "https://github.com/octocat",
+        },
+        "repos": {
+            "autotyper": {"name": "autotyper", "description": "Typing daemon in Go"},
+            "event-hub": {"name": "event-hub", "description": "Event router in Go"},
+        },
+    }
+    from app.agent.grounding import is_source_ref_grounded
+    # 'RAG system GitHub repository' contains 'system' and 'github' from profile, but is NOT a repository!
+    is_grounded, reason = is_source_ref_grounded(
+        source_ref="RAG system GitHub repository",
+        source="github",
+        turn_type="context_switch",
+        resume_text="Sample resume text",
+        github_summary=github_summary,
+    )
+    assert not is_grounded, f"Expected non-existent GitHub repo to be rejected, but passed: {reason}"
+    assert any(term in reason.lower() for term in ["repository", "portfolio", "repos", "autotyper", "not appear", "hallucinat"])
+
+
+def test_fallback_switches_to_github_when_needed():
+    """Verify that when the session needs a GitHub turn, fallback selects an uncovered repository."""
+    from app.agent.interviewer import InterviewerAgent
+    from app.session.state import SessionState
+
+    state = SessionState(
+        session_id="test-github-fallback",
+        resume_text="Experienced engineer with Python and Go skills.",
+        github_summary={
+            "repos": {
+                "autotyper": {"name": "autotyper", "description": "Typing daemon in Go", "language": "Go"},
+                "event-hub": {"name": "event-hub", "description": "Stream router in Go", "language": "Go"},
+            }
+        },
+    )
+    # Simulate 2 prior resume turns
+    state.add_interviewer_question("Welcome! Question 1", "resume_claim", "resume", "ref1")
+    state.add_candidate_answer("Answer 1")
+    state.add_interviewer_question("Question 2", "follow_up", "resume", "ref2")
+    state.add_candidate_answer("Answer 2")
+
+    agent = InterviewerAgent()
+    fallback = agent._generate_deterministic_fallback(state, is_opening=False)
+    assert fallback.source == "github"
+    assert fallback.turn_type == "github_project"
+    assert fallback.source_ref in ["autotyper", "event-hub"]
+    assert "autotyper" in fallback.question or "event-hub" in fallback.question
+
+
+def test_fallback_never_asks_consecutive_skill_questions():
+    """Verify that if turn N was skill_anchored, turn N+1 fallback never asks another skill."""
+    from app.agent.interviewer import InterviewerAgent
+    from app.session.state import SessionState
+
+    resume_text = (
+        "Technical Skills\n"
+        "- Programming: Python, Java, Go, SQL\n\n"
+        "Experience\n"
+        "- Designed and deployed high-performance stream processing engines.\n"
+    )
+    state = SessionState(
+        session_id="test-no-consecutive-skills",
+        resume_text=resume_text,
+        github_summary={},
+    )
+    # Turn 1: skill_anchored
+    state.add_interviewer_question("Question 1", "skill_anchored", "resume", "Skills Section: Python")
+    state.add_candidate_answer("Answer 1")
+
+    agent = InterviewerAgent()
+    fallback = agent._generate_deterministic_fallback(state, is_opening=False)
+    assert fallback.turn_type == "resume_claim"
+    assert "skills section" not in fallback.source_ref.lower()
+    assert "stream processing" in fallback.question.lower()
+
+
+def test_extract_deterministic_fallback_ignores_academic_cs_subjects():
+    """Verify that academic CS theory terms like OOP, DBMS, OS are ignored by fallback."""
+    from app.agent.grounding import extract_deterministic_fallback_target
+
+    resume_text = (
+        "Technical Skills\n"
+        "- Core CS: Data Structures and Algorithms, OOP, DBMS, Operating Systems, Computer Networks\n"
+        "- Languages: Python, Go\n"
+    )
+    target, ref = extract_deterministic_fallback_target(resume_text)
+    assert target.lower() not in ["oop", "dbms", "os", "cn", "operating systems", "computer networks", "data structures and algorithms"]
+    assert target.lower() in ["python", "go"]
+
+
+def test_fallback_caps_skills_at_one_across_session():
+    """Verify that even when the immediately preceding turn was not skill_anchored, fallback does not ask a second skill."""
+    from app.agent.interviewer import InterviewerAgent
+    from app.session.state import SessionState
+
+    resume_text = (
+        "Technical Skills\n"
+        "- Languages: Python, Java, Go\n\n"
+        "Experience\n"
+        "- Built microservices orchestration platform handling 10k req/sec.\n"
+    )
+    state = SessionState(
+        session_id="test-cap-skills",
+        resume_text=resume_text,
+        github_summary={},
+    )
+    # Turn 1: skill_anchored
+    state.add_interviewer_question("Question 1", "skill_anchored", "resume", "Skills Section: Python")
+    state.add_candidate_answer("Answer 1")
+    # Turn 2: follow_up (not skill_anchored)
+    state.add_interviewer_question("Question 2", "follow_up", "resume", "prior_answer")
+    state.add_candidate_answer("Answer 2")
+
+    agent = InterviewerAgent()
+    fallback = agent._generate_deterministic_fallback(state, is_opening=False)
+    assert fallback.turn_type == "resume_claim"
+    assert "skills section" not in fallback.source_ref.lower()
+    assert "microservices orchestration" in fallback.question.lower()
+
+
+
 
 

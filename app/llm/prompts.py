@@ -23,10 +23,15 @@ ORDERING & GROUNDING RULES:
 - OPENING GREETING: Begin Turn 1 with a professional, polite welcome note:
   "Welcome! Looking over your experience and background, you highlighted [insert one real project, skill, or achievement directly from their uploaded resume]. [In-depth technical inquiry probing the architecture, bottlenecks, or trade-offs of that claim or skill]?"
   For all subsequent turns (Turn 2 onwards), transition naturally and do NOT repeat the welcome note.
-- 1-TO-1 ALIGNMENT: The 'source_ref' MUST match the EXACT project or claim targeted in your 'question'. If you ask about "MovieBuddy", 'source_ref' MUST be "MovieBuddy". It is a critical error if 'question' and 'source_ref' reference different projects!
+- 1-TO-1 ALIGNMENT: The 'source_ref' MUST match the EXACT project or claim targeted in your 'question'. If you ask about project X, 'source_ref' MUST specify project X. It is a critical error if 'question' and 'source_ref' reference different projects!
 - DOMAIN RELEVANCE: Ask ONLY about technical concepts that genuinely belong to the targeted project.
 - SPARSE RESUMES & FRESHERS: If a candidate's resume has limited experience or projects (e.g. a fresher with 1-2 projects, no formal work section), you must NEVER run out of resume material and hallucinate projects to fill turns. Instead, lean more heavily on GitHub content and skill-anchored questions (turn_type='skill_anchored'), or gracefully move toward closing the session early.
+- EXPERIENCED RESUMES & EMBEDDED SKILLS: When evaluating senior/experienced candidates with rich work histories:
+  1. If the resume has NO explicit skills section, extract technical competencies, storage engines, protocols, and architectural patterns directly from their work experience bullets.
+  2. STRICT NEGATIVE CONSTRAINT: NEVER say "in your skills section", "listed under skills", or "from your technical skills" if the resume lacks a dedicated skills section. Anchor inquiries directly to the project or role where the technology was applied.
+  3. SENIORITY & ARCHITECTURAL FOCUS: Focus questions on high-impact architectural and production trade-offs: scaling bottlenecks, failure modes, concurrency/data consistency trade-offs, and alternative designs evaluated. Probe across their full career timeline rather than fixating solely on their most recent role.
 - NO FORCED CONNECTIONS: If a candidate's resume has no technical overlap with their GitHub repos, you must NOT fabricate a false connection. Switching with no stated narrative link is completely natural and encouraged.
+- GITHUB REPOSITORY INTEGRITY: When asking about GitHub work (source='github'), 'source_ref' MUST match an EXACT repository name from [SOURCE 2: GITHUB PROFILE & REPOSITORIES]. NEVER fabricate repository names (such as '<tool>-scripts' or '<library>-repo') or use a technology name (e.g. 'Redis', 'Python') as the repository name.
 
 YOUR CORE MISSION & ANTI-CHEATING MANDATE:
 - Our primary objective is to STOP CHEATING and thoroughly verify hands-on technical competence.
@@ -65,35 +70,35 @@ You must respond with ONLY a single valid JSON object with the following exact k
 FEW_SHOT_EXAMPLES: List[str] = [
     """Turn 1: Opening Turn (Grounded in a Specific Resume Claim with Welcome Greeting)
 {
-  "question": "Welcome! Looking over your experience and background, you highlighted optimizing an event pipeline with Apache Kafka to reduce latency from 450ms down to 40ms. Walk me through the bottlenecks you diagnosed in the old architecture and how you designed your partitioning strategy.",
+  "question": "Welcome! Looking over your experience and background, you highlighted designing the TelemetryRouter streaming service to optimize message ingestion. Walk me through the architectural bottlenecks you diagnosed in the initial design and the trade-offs you evaluated.",
   "turn_type": "resume_claim",
   "source": "resume",
-  "source_ref": "Kafka event pipeline migration (450ms -> 40ms latency)",
-  "reasoning_note": "Welcoming candidate and opening with a high-impact, metrics-grounded technical achievement from recent experience."
+  "source_ref": "TelemetryRouter streaming service",
+  "reasoning_note": "Welcoming candidate and opening with a concrete, grounded architectural achievement from their uploaded resume."
 }""",
-    """Turn 2: Answer-Driven Follow-Up (When Answer Lacks Depth or Sizing Specifics)
+    """Turn 2: Answer-Driven Follow-Up (Deepening Technical Trade-Offs from Prior Answer)
 {
-  "question": "You mentioned partitioning by tenant_id, but how did you handle large enterprise tenants that produce 100x the volume of standard tenants to prevent partition skew and hot spots?",
+  "question": "You mentioned buffering messages in memory during burst traffic, but how did you handle downstream backpressure to prevent out-of-memory crashes if consumer processing lagged?",
   "turn_type": "follow_up",
   "source": "resume",
-  "source_ref": "prior_answer: Kafka partition key by tenant_id and hotspot mitigation",
-  "reasoning_note": "Candidate gave a high-level answer; challenging the data skew failure mode of their chosen partition key."
+  "source_ref": "prior_answer: in-memory burst buffering and consumer backpressure",
+  "reasoning_note": "Candidate described burst buffering; probing their backpressure failure handling strategy."
 }""",
-    """Turn 3: Symmetrical Follow-Up on GitHub
+    """Turn 3: Symmetrical Follow-Up on GitHub Repository
 {
-  "question": "In Go, copy-on-write with raw pointers can lead to race conditions or unexpected memory bloat if the garbage collector gets overwhelmed during high write loads. How did you verify safety and benchmark GC pause times during snapshotting?",
+  "question": "In the storage engine you described, using a single leader coordinator can become a single point of failure during network partitions. How did you verify failover safety and prevent split-brain states?",
   "turn_type": "follow_up",
   "source": "github",
-  "source_ref": "prior_answer: Go pointer copy-on-write safety and GC pause times",
-  "reasoning_note": "Symmetrically digging deeper on a GitHub answer: challenging the memory safety and GC implications of their described Go implementation."
+  "source_ref": "prior_answer: storage engine leader failover and split-brain safety",
+  "reasoning_note": "Probing failure modes and fault-tolerance guarantees in candidate's discussed open-source repository design."
 }""",
-    """Turn 4: Skill-Anchored Question
+    """Turn 4: Adaptive Skill-Anchored Question (Grounded in Candidate Experience)
 {
-  "question": "You have 'eBPF / Kernel Tracing' listed in your technical skills section. Where have you actually applied eBPF in practice — was that in production diagnosing network bottlenecks, or in an experimental repository? Walk me through a concrete program you wrote or loaded.",
+  "question": "In your work scaling data synchronization services, you utilized relational database replication. What write amplification or replication lag bottlenecks did you encounter, and what alternative architectures did you evaluate?",
   "turn_type": "skill_anchored",
   "source": "resume",
-  "source_ref": "Skills Section: eBPF / Kernel Tracing application challenge",
-  "reasoning_note": "Testing veracity of a high-level skill claim; breaking binary source rhythm by challenging candidate to prove where the skill was applied across either source."
+  "source_ref": "relational database replication service",
+  "reasoning_note": "Anchoring on a technical skill applied in production to challenge scaling trade-offs."
 }""",
 ]
 
@@ -146,6 +151,7 @@ def calculate_source_nudge(
     transcript: List[Dict[str, Any]],
     max_consecutive: int = 3,
     has_github: bool = True,
+    github_summary: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Generates boundary guidance to ensure multi-source coverage and prevent monologues."""
     interviewer_turns = [
@@ -164,6 +170,19 @@ def calculate_source_nudge(
     last_turn_type = turn_types[-1] if turn_types else ""
     github_turns_count = sum(1 for s in sources if s == "github")
 
+    repos = github_summary.get("repos", {}) if isinstance(github_summary, dict) else {}
+    repo_list_str = ""
+    if repos:
+        repo_items = []
+        for name, rdata in repos.items():
+            lang = f" ({rdata.get('language')})" if isinstance(rdata, dict) and rdata.get("language") else ""
+            repo_items.append(f"  - {name}{lang}")
+        repo_list_str = (
+            "\nVERIFIED GITHUB REPOSITORIES (You MUST choose one from this exact list):\n"
+            + "\n".join(repo_items)
+            + "\nSTRICT CONSTRAINT: DO NOT target resume projects under source='github' unless they match one of the exact repository names above.\n"
+        )
+
     # If the candidate has GitHub repositories and we have reached turn 3+ with ZERO GitHub turns, mandate a GitHub pivot!
     if has_github and github_turns_count == 0 and len(interviewer_turns) >= 2:
         return (
@@ -171,6 +190,7 @@ def calculate_source_nudge(
             "You have spent multiple turns on the resume and have NOT yet asked about the candidate's GitHub portfolio. "
             "To verify public code and avoid a resume-only interview, your NEXT question MUST target one of the candidate's public repositories "
             "from [SOURCE 2: GITHUB PROFILE & REPOSITORIES] above.\n"
+            f"{repo_list_str}\n"
             "Requirements:\n"
             "- Set source='github'\n"
             "- Set turn_type='context_switch' or 'github_project'\n"
@@ -190,9 +210,11 @@ def calculate_source_nudge(
         if len(set(recent_sources)) == 1:
             current_source = recent_sources[0]
             alt_source = "github" if current_source == "resume" and has_github else "resume"
+            alt_repo_hint = repo_list_str if alt_source == "github" else ""
             return (
                 f"SOURCE ROTATION MANDATE: The last {max_consecutive} questions have all been sourced from {current_source}. "
                 f"You MUST now pivot to an uncovered item from {alt_source} to test breadth across their background. "
+                f"{alt_repo_hint}\n"
                 f"Set source='{alt_source}' and turn_type='context_switch'."
             )
 

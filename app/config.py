@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     LLM_PROVIDER: Literal["openrouter", "ollama", "mock"] = "openrouter"
 
     # Ollama settings (Local LLM)
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
     OLLAMA_MODEL: str = "llama3.2:latest"
 
     # OpenRouter API settings (Cloud LLM)

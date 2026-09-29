@@ -161,14 +161,18 @@ interview-agent/
     2. Enforces **Turn 1 Resume Ordering Rule**: Opening question is strictly sourced from resume claims or skills (`source: "resume"`).
     3. Builds the context window with the system prompt, dossier, transcripts, and soft nudges.
     4. Manages symmetrical follow-ups: evaluates last answer depth based on "key point" criteria regardless of whether last turn was resume, GitHub, or skill-anchored.
-    5. Executes answer-driven context switches and skill-anchored inquiries.
+    5. Avoids mechanical checklist hopping by encouraging deep 1-2 turn probing on candidate trade-offs.
     6. Calls configured LLM provider via `LLMClient`.
-    7. **Code-Level Grounding Validation Layer**:
-       - Extracts `source_ref` from structured output.
-       - Fuzzy-matches `source_ref` against the entire raw `resume_text` or `github_summary` blob (resilient to varied layouts and PDF extraction noise).
-       - On failure: logs the hallucination, rejects the question, and retries generation once with an explicit correction instruction.
-       - On second failure: falls back deterministically to a verified app-layer question anchored to an extracted resume skill/bullet.
+    7. Executes two-tier grounding validation via `grounding.py`.
     8. Appends verified turns to `session_state.transcript` and registers explored items in `covered_refs`.
+- **`grounding.py`**:
+  - Code-level anti-hallucination verification engine:
+    1. **Question Assumption Validation (`validate_question_assumptions`)**: Scans `question` text for contextual claims (e.g. `in your <pipeline/system>`) and verifies them against established dossier facts and prior answers, rejecting fabricated architectures.
+    2. **Source Reference Validation (`is_source_ref_grounded`)**:
+       - Word-boundary token checking (`is_token_in_text`) with lookaround assertions `(?<![a-zA-Z0-9_])tok(?![a-zA-Z0-9_])` preventing substring false positives (e.g., `"go"` matching inside `"mongodb"` or `"algorithms"`).
+       - Strict follow-up transcript isolation: when `turn_type == "follow_up"` or `source_ref` starts with `prior_answer:`, requires keywords to be present in what the candidate actually stated in prior answers.
+       - Fuzzy and sequence matching for multi-token source references across raw documents.
+    3. **Deterministic Fallback Generator (`extract_deterministic_fallback_target`)**: When LLM grounding fails twice, extracts a guaranteed-grounded skill or bullet from raw resume text while respecting `covered_refs`.
 
 ### 3.6 `app.api`
 - **`models.py`**:
@@ -200,7 +204,9 @@ FastAPI Route (routes.py)
   │      - Assemble initial prompt (State = INIT -> SELECT_FOCUS -> ASK)
   │      - Enforce Ordering Rule: source must be "resume"
   │      - Call LLMClient (OpenRouter or Ollama)
-  │      - Code-Level Validation: fuzzy-match source_ref against raw resume
+  │      - Two-Tier Validation (grounding.py):
+  │        * Tier 1: validate_question_assumptions (no fabricated context)
+  │        * Tier 2: is_source_ref_grounded with word-boundary lookarounds
   │        * If ungrounded -> Retry once with correction prompt
   │        * If 2nd failure -> Deterministic fallback question
   │      - Append turn to transcript; record source_ref in covered_refs

@@ -11,6 +11,15 @@ from app.llm.base import BaseLLMClient
 logger = logging.getLogger(__name__)
 
 
+
+def normalize_ollama_url(url: str) -> str:
+    """Normalizes Ollama base URL, replacing localhost with 127.0.0.1 to avoid Windows IPv6 resolution issues."""
+    cleaned = (url or "").rstrip("/")
+    if "://localhost" in cleaned:
+        cleaned = cleaned.replace("://localhost", "://127.0.0.1")
+    return cleaned
+
+
 class OllamaClient(BaseLLMClient):
     """Local Ollama client supporting OpenAI-compatible and native chat endpoints."""
 
@@ -19,7 +28,7 @@ class OllamaClient(BaseLLMClient):
         base_url: Optional[str] = None,
         model: Optional[str] = None,
     ):
-        raw_url = (base_url or settings.OLLAMA_BASE_URL).rstrip("/")
+        raw_url = normalize_ollama_url(base_url or settings.OLLAMA_BASE_URL)
         # Ensure base_url does not double /v1 if already provided
         self.base_url = raw_url
         self.model = model or settings.OLLAMA_MODEL
@@ -42,17 +51,18 @@ class OllamaClient(BaseLLMClient):
             "response_format": {"type": "json_object"},
         }
 
-        max_retries = 2
+        max_retries = 3
         last_err = None
 
-        async with httpx.AsyncClient() as client:
+        client_timeout = httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=15.0)
+        async with httpx.AsyncClient(timeout=client_timeout) as client:
             for attempt in range(1, max_retries + 1):
                 try:
                     resp = await client.post(
                         url,
                         headers={"Content-Type": "application/json"},
                         json=payload,
-                        timeout=90.0,
+                        timeout=client_timeout,
                     )
 
                     # If /v1/chat/completions is not found, try native /api/chat
@@ -69,7 +79,7 @@ class OllamaClient(BaseLLMClient):
                             native_url,
                             headers={"Content-Type": "application/json"},
                             json=native_payload,
-                            timeout=90.0,
+                            timeout=client_timeout,
                         )
 
                     if resp.status_code == 401:
@@ -95,12 +105,13 @@ class OllamaClient(BaseLLMClient):
 
                 except (httpx.TimeoutException, httpx.NetworkError) as net_err:
                     last_err = net_err
+                    err_detail = str(net_err) or repr(net_err)
                     logger.warning(
-                        f"Network error calling Ollama ({self.base_url}) on attempt {attempt}/{max_retries}: {net_err}"
+                        f"Network error calling Ollama ({self.base_url}) on attempt {attempt}/{max_retries}: {type(net_err).__name__} ({err_detail})"
                     )
                     await asyncio.sleep(1.0 * attempt)
 
             raise RuntimeError(
                 f"Failed to communicate with Ollama at {self.base_url} after {max_retries} attempts: {last_err}. "
-                "Ensure Ollama is running ('ollama serve') and the model is pulled ('ollama pull <model>')."
+                f"Ensure Ollama is running ('ollama serve') and the model '{self.model}' is pulled ('ollama pull {self.model}')."
             )

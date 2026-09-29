@@ -125,18 +125,20 @@ with st.sidebar:
         )
 
         def get_ollama_models() -> list[str]:
-            try:
-                resp = httpx.get("http://localhost:11434/api/tags", timeout=1.5)
-                if resp.status_code == 200:
-                    raw_models = [m["name"] for m in resp.json().get("models", [])]
-                    # Put truly local models first; push :cloud models to the end
-                    local = [m for m in raw_models if not m.endswith(":cloud")]
-                    cloud = [m for m in raw_models if m.endswith(":cloud")]
-                    return local + cloud
-            except Exception:
-                pass
+            for endpoint in ["http://127.0.0.1:11434", "http://localhost:11434"]:
+                try:
+                    resp = httpx.get(f"{endpoint}/api/tags", timeout=2.0)
+                    if resp.status_code == 200:
+                        raw_models = [m["name"] for m in resp.json().get("models", [])]
+                        # Put truly local models first; push :cloud models to the end
+                        local = [m for m in raw_models if not m.endswith(":cloud")]
+                        cloud = [m for m in raw_models if m.endswith(":cloud")]
+                        return local + cloud
+                except Exception:
+                    continue
             return []
 
+        local_models = []
         if llm_provider_choice == "Mock LLM (Instant Demo)":
             chosen_provider = "mock"
             chosen_model = "mock-interview-agent"
@@ -170,7 +172,7 @@ with st.sidebar:
                     st.caption("🟢 Local offline Ollama model ready.")
             else:
                 chosen_model = st.text_input("Ollama Model", value="llama3.2:latest")
-                st.caption("⚠️ Ensure Ollama is running ('ollama serve') on port 11434.")
+                st.error("⚠️ Cannot connect to Ollama at http://127.0.0.1:11434. Ensure Ollama is running ('ollama serve') and a model is pulled.")
         else:
             chosen_provider = "openrouter"
             chosen_model = st.text_input(
@@ -216,7 +218,9 @@ with st.sidebar:
         else:
             resume_text_to_send = st.text_area("Paste Resume Text", height=150, placeholder="Paste resume plain text here...")
 
-        if st.button("🚀 Start Interview", type="primary", use_container_width=True, disabled=not is_online):
+        ollama_offline = (chosen_provider == "ollama" and not local_models)
+        start_disabled = (not is_online) or ollama_offline
+        if st.button("🚀 Start Interview", type="primary", use_container_width=True, disabled=start_disabled):
             with st.spinner("Ingesting Resume & GitHub profile... Initializing state machine..."):
                 try:
                     payload = {

@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 from app.agent.grounding import (
+    extract_candidate_anchors,
     extract_deterministic_fallback_target,
     is_source_ref_grounded,
 )
@@ -119,23 +120,102 @@ class InterviewerAgent:
     def _generate_deterministic_fallback(
         self, state: SessionState, is_opening: bool
     ) -> InterviewerTurnOutput:
-        """Generates a deterministic, verifiably grounded fallback question from the resume."""
+        """Generates a deterministic, verifiably grounded fallback question from GitHub or resume."""
+        interviewer_turns = [
+            t for t in state.transcript if t.role == "interviewer" and t.meta
+        ]
+        sources = [
+            t.meta.source for t in interviewer_turns if t.meta and t.meta.source
+        ]
+        turn_types = [
+            t.meta.turn_type for t in interviewer_turns if t.meta and t.meta.turn_type
+        ]
+        last_turn_type = turn_types[-1] if turn_types else ""
+        github_turns_count = sum(1 for s in sources if s == "github")
+        skill_turns_count = sum(1 for tt in turn_types if tt == "skill_anchored")
+
+        has_github_repos = bool(
+            state.github_summary
+            and isinstance(state.github_summary, dict)
+            and state.github_summary.get("repos")
+        )
+
+        # 1. If GitHub repositories exist and have never been explored after 2+ turns, fall back to GitHub
+        if not is_opening and has_github_repos and github_turns_count == 0 and len(interviewer_turns) >= 2:
+            covered_github_refs = {
+                c.ref.lower().strip() for c in state.covered_refs if c.source == "github"
+            }
+            repos_dict = state.github_summary.get("repos", {})
+            available_repo = None
+            for repo_name, repo_data in repos_dict.items():
+                if repo_name.lower().strip() not in covered_github_refs:
+                    available_repo = (repo_name, repo_data)
+                    break
+
+            if available_repo:
+                repo_name, repo_data = available_repo
+                description = repo_data.get("description", "") if isinstance(repo_data, dict) else ""
+                language = repo_data.get("language", "") if isinstance(repo_data, dict) else ""
+                context_clause = f" involving {language}" if language else ""
+
+                if description:
+                    question = (
+                        f"Looking at your public GitHub repositories, I noticed your project '{repo_name}', "
+                        f"described as '{description}'. Walk me through the core system architecture{context_clause} "
+                        f"and the primary concurrency or design trade-offs you navigated."
+                    )
+                else:
+                    question = (
+                        f"Looking at your public GitHub repositories, I noticed your project '{repo_name}'. "
+                        f"Walk me through the core system architecture{context_clause} "
+                        f"and the primary concurrency or design trade-offs you navigated."
+                    )
+
+                return InterviewerTurnOutput(
+                    question=question,
+                    turn_type="github_project",
+                    source="github",
+                    source_ref=repo_name,
+                    reasoning_note="Deterministic app-layer fallback generated after LLM grounding validation failed twice.",
+                )
+
+        # 2. Resume Fallback (Ensure no consecutive skill questions, and maximum 1 skill question per session)
+        force_bullet = (last_turn_type == "skill_anchored" or skill_turns_count >= 1)
         target, ref = extract_deterministic_fallback_target(
             state.resume_text,
             covered_refs=state.covered_refs,
+            force_bullet=force_bullet,
         )
+        is_skill = ref.startswith("Skills Section:")
+
         if is_opening:
-            question = (
-                f"Welcome! Looking over your experience and background, you highlighted your work with {target}. "
-                f"Walk me through a challenging technical problem you solved involving {target} and the primary architectural trade-offs you navigated."
-            )
-            turn_type = "resume_claim" if len(target.split()) > 4 else "skill_anchored"
+            if not is_skill:
+                lower_first = target[:1].lower() + target[1:] if not target.isupper() else target
+                question = (
+                    f"Welcome! Looking over your experience and background, you highlighted that you {lower_first}. "
+                    f"Walk me through the system architecture you built and the primary technical trade-offs you navigated."
+                )
+                turn_type = "resume_claim"
+            else:
+                question = (
+                    f"Welcome! Looking over your experience and background, you highlighted your work with {target}. "
+                    f"Walk me through a challenging technical problem you solved involving {target} and the primary architectural trade-offs you navigated."
+                )
+                turn_type = "skill_anchored"
         else:
-            question = (
-                f"Turning to another aspect of your background: can you tell me about your experience with {target} "
-                f"and walk me through a concrete system where you applied it?"
-            )
-            turn_type = "skill_anchored" if len(target.split()) <= 4 else "resume_claim"
+            if not is_skill:
+                lower_first = target[:1].lower() + target[1:] if not target.isupper() else target
+                question = (
+                    f"Turning to your work where you {lower_first}: walk me through the system architecture "
+                    f"and the primary operational or scaling trade-offs you navigated."
+                )
+                turn_type = "resume_claim"
+            else:
+                question = (
+                    f"Turning to your experience with {target}: walk me through the system architecture where you applied it "
+                    f"and the primary operational or scaling trade-offs you navigated."
+                )
+                turn_type = "skill_anchored"
 
         return InterviewerTurnOutput(
             question=question,
@@ -212,19 +292,32 @@ class InterviewerAgent:
             )
             transcript_dict = [t.model_dump() for t in state.transcript]
             nudge = calculate_source_nudge(
-                transcript_dict, max_consecutive=3, has_github=has_github_repos
+                transcript_dict,
+                max_consecutive=3,
+                has_github=has_github_repos,
+                github_summary=state.github_summary,
             )
             if nudge:
                 instructions.append(nudge)
 
             if not state.transcript:
+                anchors = extract_candidate_anchors(state.resume_text)
+                anchor_hint = ""
+                if anchors:
+                    formatted_anchors = "\n".join(f"  - {a}" for a in anchors)
+                    anchor_hint = (
+                        f"VERIFIED CANDIDATE ANCHOR TOPICS FROM RESUME (Focus your opening question on one of these):\n"
+                        f"{formatted_anchors}\n\n"
+                    )
+
                 instructions.append(
                     "You are generating the OPENING question (Turn 1).\n"
                     "MANDATORY OPENING GREETING CONTRACT:\n"
                     "Start the interview with a polite, professional welcome note that frames the technical inquiry around one real skill, project, or claim found in their uploaded resume.\n"
-                    "Required pattern: 'Welcome! Looking over your experience and background, you highlighted [insert one real project, skill, or achievement directly from their uploaded resume]. [Walk me through / Can you walk me through (concrete technical inquiry probing that project or skill)]?'\n"
-                    "GROUNDING MANDATE: The project, skill, or metric referenced MUST come 100% from the uploaded document in the CANDIDATE DOSSIER above. Never use made-up or template examples.\n"
-                    "DO NOT COPY FEW-SHOT EXAMPLES: Under no circumstances should you cite Apache Kafka, 450ms latency, or any project from the few-shot calibration examples unless it appears verbatim in the uploaded resume!\n"
+                    "Required pattern: 'Welcome! Looking over your experience and background, you highlighted [insert one real project, skill, or achievement directly from their uploaded resume]. [Walk me through / Can you walk me through (concrete technical inquiry probing that project or skill)]?'\n\n"
+                    f"{anchor_hint}"
+                    "GROUNDING MANDATE: The project, skill, company, or metric referenced MUST come 100% verbatim from the uploaded document in the CANDIDATE DOSSIER above. Never invent metrics or copy entities from the calibration examples.\n"
+                    "DO NOT COPY CALIBRATION EXAMPLES: Under no circumstances should you cite TelemetryRouter, PostgreSQL WAL, or any entity from the calibration examples unless it appears verbatim in the candidate's uploaded resume!\n"
                     "ORDERING MANDATE: Turn 1 MUST have source='resume'. Do not ask about GitHub projects on Turn 1.\n"
                     "1-TO-1 CONSISTENCY: 'source_ref' MUST match the EXACT project or claim targeted in your question.\n"
                     "DOMAIN RELEVANCE: Ask only about technical concepts that genuinely belong to the targeted project."
@@ -323,6 +416,14 @@ class InterviewerAgent:
                 "You must generate a new question using ONLY content verifiably present in the source material above. "
                 + ("REMINDER: The opening turn (Turn 1) MUST be sourced from the resume." if is_opening else "")
             )
+            # If the rejected turn targeted GitHub or failed on a repository reference, provide the exact valid repository list
+            if (turn_output.source == "github" or "github" in str(fail_reason).lower()) and state.github_summary.get("repos"):
+                valid_repos = list(state.github_summary["repos"].keys())
+                correction_instruction += (
+                    f"\nSTRICT GITHUB CONSTRAINT: The candidate's ONLY public repositories are: {valid_repos}. "
+                    f"If asking about GitHub (source='github'), 'source_ref' MUST match one of these exact repository names: {valid_repos}. "
+                    f"DO NOT invent repository names like '<tech>-scripts' or use generic technology names like 'Redis' as the repository name."
+                )
             retry_messages = list(messages) + [
                 {"role": "user", "content": correction_instruction}
             ]

@@ -92,18 +92,24 @@ The agent's intelligence is governed by:
 - **Actions**:
   1. Construct the LLM completion prompt including system rules, few-shot examples, candidate dossier, transcript history, and app-layer nudges.
   2. Call configured LLM client (OpenRouter, Ollama, or Mock) with structured output handling.
-  3. **Code-Level Grounding Validation (Anti-Hallucination Guard)**:
-     - Extract `source_ref` and `source` from the structured output.
-     - **Ordering Verification**: If Turn 1 and `source != "resume"`, reject immediately.
-     - **Fuzzy Matching**: Match `source_ref` against the entire raw `resume_text` (if `source == "resume"`) or `github_summary` blob (if `source == "github"`). Matching uses normalized substring/keyword overlap and token sequence matching (tolerant of PDF extraction noise and varied layouts, without hardcoded section headers).
+  3. **Two-Tier Code-Level Grounding Validation Layer (Anti-Hallucination Guard)**:
+     - **Tier 1: Question-Level Assumption Validation (`validate_question_assumptions`)**:
+       - Extracts factual contextual assumptions made by the question text (e.g. phrases matching `in your <phrase>`, `for your <phrase>`, `part of your <phrase>`).
+       - Verifies every substantive assumption against the established fact corpus (`resume_text` + `github_summary` + candidate answers in `transcript`).
+       - **Anti-Context Fabrication**: If the question invents unestablished systems, pipelines, or domains (e.g., claiming *"in your real-time data pipeline"* when the candidate only built a Redis lock service), the question is rejected with `unsupported context assumption`.
+     - **Tier 2: Source Reference Validation (`is_source_ref_grounded`)**:
+       - **Ordering Rule**: If Turn 1 and `source != "resume"`, reject immediately.
+       - **Word-Boundary Matcher (`is_token_in_text`)**: Employs lookaround regex assertions `(?<![a-zA-Z0-9_])tok(?![a-zA-Z0-9_])` to ensure short tokens do not trigger substring false positives (e.g., preventing `"go"` from matching inside `"mongodb"` or `"algorithms"`).
+       - **Follow-Up Transcript Isolation**: When `turn_type == "follow_up"` or `source_ref` references `prior_answer:`, the referenced keywords MUST be verifiably present in what the candidate actually stated in prior transcript answers (or immediate conversation context). Rejects hallucinated attributions (e.g., claiming the candidate discussed Go when they only discussed Redis Lua scripts).
+       - **Fuzzy Matching for General Claims**: Matches `source_ref` against the raw `resume_text` or `github_summary` blob with sequence matching and token overlap thresholds.
      - **On Validation Failure (Turn Rejected)**:
        - Do not surface the question to the candidate.
-       - Log the validation failure with question text, claimed `source_ref`, and reason.
+       - Log the validation failure with question text, claimed `source_ref`, and specific reason.
        - Retry LLM generation once with an explicit correction message:
-         *"Your previous question referenced '<source_ref>', which does not appear in the provided resume or GitHub data. Generate a new question using ONLY content verifiably present in the source material below."*
+         *"CRITICAL GROUNDING ERROR: Your previous question referenced '<source_ref>', which was rejected because: <reason>. You must generate a new question using ONLY content verifiably present in the source material above."*
      - **On Second Validation Failure**:
        - Do not call the LLM a third time.
-       - Fall back to a deterministic, app-layer grounded question (e.g. selecting an extracted skill or bullet from the candidate's actual resume: *"Tell me about your experience with <skill> and where you applied it."*).
+       - Fall back deterministically to a verified app-layer question using `extract_deterministic_fallback_target` (e.g. extracting an unused skill or bullet from the candidate's actual resume while cross-referencing `covered_refs`).
   4. Append validated interviewer turn to `transcript` with metadata.
   5. Add `{source, source_ref}` to `covered_refs`.
   6. Return verified question response to client.
@@ -123,8 +129,9 @@ The agent's intelligence is governed by:
 - **Actions**:
   1. Reason over the candidate's last answer in conjunction with the interview history:
      - **Symmetrical Follow-Ups**: Follow-up availability is independent of source — do not special-case resume vs github when choosing whether to dig deeper. If the candidate just answered a GitHub question, probe their implementation choices, trade-offs, or stated numbers just as vigorously as a resume answer.
+     - **Avoid Mechanical Checklist Hopping**: When an answer introduces interesting technical decisions, trade-offs, or concrete tools, prefer 1 or 2 targeted follow-ups (`turn_type='follow_up'`) to test hands-on depth before pivoting to a new topic.
      - **Did the candidate give a vague or evasive answer?** → **Action**: Follow up to challenge the specifics (source-agnostic).
-     - **Did the candidate give a crisp, comprehensive technical answer?** → **Action**: Natural pivot point; shift to another project, skill anchor, or cross-switch source.
+     - **Did the candidate give a crisp, comprehensive technical answer that resolved all trade-offs?** → **Action**: Natural pivot point; shift to another project, skill anchor, or cross-switch source.
      - **Did the candidate name-drop a skill/tech appearing in the other source?** → **Action**: Bridge across sources naturally.
      - **Has the topic been adequately explored?** → **Action**: Pivot without requiring a fixed turn count.
      - **Has the session reached the configured limit (e.g., turn 14/15)?** → **Action**: Transition `turn_type` to `closing`.
@@ -294,9 +301,15 @@ Every LLM generation for an interviewer turn must conform to the following schem
 4. **LLM outputs malformed JSON or markdown codeblocks**:
    - The client strips markdown wrappers (` ```json ... ``` `) and uses a fallback regex extractor before retrying with an explicit JSON-repair instruction.
 5. **Model attempts to ask ungrounded or hallucinated question**:
-   - Captured deterministically by the Code-Level Grounding Validation layer via fuzzy matching against the raw candidate dossier. Retried once with explicit correction prompt. If validation fails twice, replaced by a deterministic fallback question.
+   - Captured deterministically by the Two-Tier Code-Level Grounding Validation layer via question assumption extraction and fuzzy matching against the raw candidate dossier. Retried once with explicit correction prompt. If validation fails twice, replaced by a deterministic fallback question.
 6. **Sparse or fresher resume (limited projects/experience)**:
    - When a resume lacks deep project history, the agent avoids hallucinating details to fill turns; it leans heavily on public GitHub repositories and skill-anchored inquiries or transitions toward early closing.
 7. **Messy PDF text extraction (jumbled tables, missing headers)**:
    - Raw text is ingested without fragile structural assumptions. The grounding validation layer matches keywords and sub-phrases across the entire raw document blob rather than relying on brittle section headers.
+8. **Short token substring collisions (e.g. "Go" matching inside "MongoDB" or "algorithms")**:
+   - Prevented by `is_token_in_text` using regex word-boundary lookaround assertions `(?<![a-zA-Z0-9_])tok(?![a-zA-Z0-9_])`.
+9. **Question context fabrication (e.g. inventing "real-time data pipeline")**:
+   - Caught by `validate_question_assumptions` which ensures every surrounding system architecture claimed in question phrasing is grounded in the candidate's portfolio or prior answers.
+10. **Few-shot prompt template contamination**:
+    - Addressed via explicit negative constraints in the system prompt and Turn 1 instructions, forbidding models from parroting calibration examples (Kafka, 450ms latency, etc.).
 
