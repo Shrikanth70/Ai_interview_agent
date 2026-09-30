@@ -75,6 +75,18 @@ class StartSessionRequest(BaseModel):
         default=None,
         description="Model name override (e.g. 'llama3.1' or 'anthropic/claude-3.5-sonnet').",
     )
+    starting_theme: Optional[Literal["PROFILE", "JD"]] = Field(
+        default=None,
+        description="Initial theme override ('PROFILE' or 'JD'). If None, randomized 50/50.",
+    )
+    jd_text: Optional[str] = Field(
+        default=None,
+        description="Optional raw text of the target role Job Description.",
+    )
+    jd_scenarios: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Optional pre-structured JD technical scenarios.",
+    )
 
     @model_validator(mode="after")
     def validate_inputs(self) -> "StartSessionRequest":
@@ -98,6 +110,20 @@ class StartSessionRequest(BaseModel):
         return self
 
 
+class OrchestrationResponse(BaseModel):
+    """Real-time metadata describing the 2-theme engine, budget, and memory hierarchy."""
+
+    active_theme: Literal["PROFILE", "JD"] = "PROFILE"
+    active_context_id: str = ""
+    current_rubric_dimension: Optional[str] = None
+    is_bridge_turn: bool = False
+    minutes_remaining: float = 25.0
+    elapsed_minutes: float = 0.0
+    is_closing_time: bool = False
+    sub_memories: List[Dict[str, Any]] = Field(default_factory=list)
+    globally_covered_topics: List[str] = Field(default_factory=list)
+
+
 class StartSessionResponse(BaseModel):
     """Response returned upon successful session creation."""
 
@@ -105,6 +131,7 @@ class StartSessionResponse(BaseModel):
     status: Literal["active", "completed"] = "active"
     turn_index: int
     turn: InterviewerTurnOutput
+    orchestration: Optional[OrchestrationResponse] = None
 
 
 class SubmitAnswerRequest(BaseModel):
@@ -115,6 +142,10 @@ class SubmitAnswerRequest(BaseModel):
         min_length=1,
         description="Verbatim text of the candidate's answer.",
     )
+    jev_signal: Optional[Literal["FOLLOW_UP", "SWITCH_CONTEXT"]] = Field(
+        default=None,
+        description="External evaluator signal driving next question strategy (FOLLOW_UP or SWITCH_CONTEXT).",
+    )
 
 
 class SubmitAnswerResponse(BaseModel):
@@ -124,6 +155,7 @@ class SubmitAnswerResponse(BaseModel):
     status: Literal["active", "completed"]
     turn_index: int
     turn: InterviewerTurnOutput
+    orchestration: Optional[OrchestrationResponse] = None
 
 
 class TranscriptResponse(BaseModel):

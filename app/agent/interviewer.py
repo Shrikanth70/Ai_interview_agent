@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import random
 from typing import Any, Dict, List, Literal, Optional
@@ -36,12 +37,18 @@ class InterviewerTurnOutput(BaseModel):
         "resume_claim",
         "github_project",
         "skill_anchored",
+        "role_scenario",
         "follow_up",
         "context_switch",
+        "theme_switch",
         "closing",
     ] = Field(
         ...,
         description="Intent of the turn.",
+    )
+    theme: Optional[Literal["PROFILE", "JD"]] = Field(
+        default=None,
+        description="Active theme of the question (PROFILE or JD).",
     )
     source: Optional[Literal["resume", "github", "jd"]] = Field(
         default="resume",
@@ -77,9 +84,14 @@ class InterviewerTurnOutput(BaseModel):
             "skills": "skill_anchored",
             "skill_anchored": "skill_anchored",
             "skill_anchor": "skill_anchored",
+            "role_scenario": "role_scenario",
+            "jd_scenario": "role_scenario",
+            "scenario": "role_scenario",
             "followup": "follow_up",
             "follow_up": "follow_up",
-            "switch": "context_switch",
+            "switch": "theme_switch",
+            "theme_switch": "theme_switch",
+            "bridge": "theme_switch",
             "context_switch": "context_switch",
             "closing": "closing",
             "close": "closing",
@@ -146,6 +158,31 @@ class InterviewerAgent:
             and isinstance(state.github_summary, dict)
             and state.github_summary.get("repos")
         )
+
+        # 0. JD Theme Fallback
+        if state.orchestration.active_theme == "JD" and state.orchestration.active_context_id:
+            active_sub = state.sub_memories.get(state.orchestration.active_context_id)
+            if active_sub and active_sub.source_slice:
+                title = active_sub.source_slice.get("title", active_sub.source_ref)
+                prob = active_sub.source_slice.get("problem_statement", "")
+                if is_opening:
+                    question = (
+                        f"Welcome! In this role, we frequently design systems tackling '{title}'. "
+                        f"{prob} Walk me through how you would architect a solution from scratch and what primary trade-offs you would design around."
+                    )
+                else:
+                    question = (
+                        f"Turning to our role scenario '{title}': {prob} "
+                        f"Walk me through your methodology for designing this system and how you mitigate failure modes."
+                    )
+                return InterviewerTurnOutput(
+                    question=question,
+                    turn_type="role_scenario" if is_opening else ("theme_switch" if state.orchestration.theme_switch_pending else "follow_up"),
+                    source="jd",
+                    source_ref=active_sub.source_ref,
+                    reasoning_note="Deterministic app-layer fallback generated for JD role scenario.",
+                    theme="JD",
+                )
 
         # 1. If GitHub repositories exist and have never been explored after 2+ turns, fall back to GitHub
         if not is_opening and has_github_repos and github_turns_count == 0 and len(interviewer_turns) >= 2:
@@ -244,7 +281,8 @@ class InterviewerAgent:
         system_content = [MASTER_SYSTEM_PROMPT]
         if FEW_SHOT_EXAMPLES:
             system_content.append("\n--- FEW-SHOT EXAMPLES (For Calibration) ---")
-            for idx, shot in enumerate(FEW_SHOT_EXAMPLES, 1):
+            shot_limit = 1 if state.llm_provider == "ollama" else 2
+            for idx, shot in enumerate(FEW_SHOT_EXAMPLES[:shot_limit], 1):
                 system_content.append(f"Example {idx}:\n{shot}")
         messages.append({"role": "system", "content": "\n".join(system_content)})
 
@@ -310,7 +348,7 @@ class InterviewerAgent:
                 has_github=has_github_repos,
                 github_summary=state.github_summary,
             )
-            if nudge:
+            if nudge and not bridge_data:
                 instructions.append(nudge)
 
             if bridge_data:
@@ -320,14 +358,16 @@ class InterviewerAgent:
                     if target_ctx
                     else "Upcoming Scenario"
                 )
+                target_theme = bridge_data.get("target_theme", "JD")
                 instructions.append(
                     format_bridge_turn_prompt(
                         anchor_ref=bridge_data.get("anchor_source_ref", "Previous Project"),
                         anchor_slice=bridge_data.get("anchor_slice", {}),
-                        target_theme=bridge_data.get("target_theme", "JD"),
+                        target_theme=target_theme,
                         target_ref=target_ref,
                         target_slice=bridge_data.get("target_slice", {}),
                     )
+                    + f"\nCRITICAL THEME SWITCH MANDATE: Set turn_type='theme_switch'. Set source='{target_theme.lower() if target_theme == 'JD' else 'resume'}'. Set source_ref='{target_ref}'."
                 )
             elif state.orchestration.active_context_id:
                 active_sub = state.sub_memories.get(state.orchestration.active_context_id)
@@ -348,30 +388,44 @@ class InterviewerAgent:
                     )
 
             if not state.transcript:
-                anchors = extract_candidate_anchors(state.resume_text)
-                anchor_hint = ""
-                if anchors:
-                    formatted_anchors = "\n".join(f"  - {a}" for a in anchors)
-                    anchor_hint = (
-                        f"VERIFIED CANDIDATE ANCHOR TOPICS FROM RESUME (Focus your opening question on one of these):\n"
-                        f"{formatted_anchors}\n\n"
+                if state.orchestration.active_theme == "JD":
+                    active_sub = state.sub_memories.get(state.orchestration.active_context_id)
+                    scenario_title = active_sub.source_slice.get("title", active_sub.source_ref) if active_sub and active_sub.source_slice else "Role System Design Scenario"
+                    scenario_problem = active_sub.source_slice.get("problem_statement", "") if active_sub and active_sub.source_slice else ""
+                    instructions.append(
+                        "You are generating the OPENING question (Turn 1) for THEME: JD.\n"
+                        "MANDATORY OPENING GREETING CONTRACT (ROLE SCENARIO):\n"
+                        "Start the interview with a polite, professional welcome note framing the technical challenge around the role scenario.\n"
+                        f"Target Scenario: '{scenario_title}'\n"
+                        f"Problem Statement: {scenario_problem}\n"
+                        "Required pattern: 'Welcome! In this role, we frequently design systems tackling [Scenario Title]: [Problem Statement]. Walk me through how you would architect a solution from scratch and what primary trade-offs you would design around.'\n"
+                        f"MANDATORY SCHEMA: Set turn_type='role_scenario', source='jd', source_ref='{scenario_title}'."
                     )
+                else:
+                    anchors = extract_candidate_anchors(state.resume_text)
+                    anchor_hint = ""
+                    if anchors:
+                        formatted_anchors = "\n".join(f"  - {a}" for a in anchors)
+                        anchor_hint = (
+                            f"VERIFIED CANDIDATE ANCHOR TOPICS FROM RESUME (Focus your opening question on one of these):\n"
+                            f"{formatted_anchors}\n\n"
+                        )
 
-                instructions.append(
-                    "You are generating the OPENING question (Turn 1).\n"
-                    "MANDATORY OPENING GREETING CONTRACT:\n"
-                    "Start the interview with a polite, professional welcome note that frames the technical inquiry around one real skill, project, or claim found in their uploaded resume or public GitHub profile.\n"
-                    "Required pattern: 'Welcome! Looking over your experience and background, you highlighted [insert one real project, skill, or achievement directly from their uploaded resume or public repository]. [Walk me through / Can you walk me through (concrete technical inquiry probing that project or skill)]?'\n\n"
-                    f"{anchor_hint}"
-                    "GROUNDING MANDATE: The project, skill, company, or metric referenced MUST come 100% verbatim from the uploaded document in the CANDIDATE DOSSIER above. Never invent metrics or copy entities from the calibration examples.\n"
-                    "DO NOT COPY CALIBRATION EXAMPLES: Under no circumstances should you cite TelemetryRouter, PostgreSQL WAL, or any entity from the calibration examples unless it appears verbatim in the candidate's uploaded resume!\n"
-                    "1-TO-1 CONSISTENCY: 'source_ref' MUST match the EXACT project or claim targeted in your question.\n"
-                    "DOMAIN RELEVANCE: Ask only about technical concepts that genuinely belong to the targeted project."
-                )
+                    instructions.append(
+                        "You are generating the OPENING question (Turn 1) for THEME: PROFILE.\n"
+                        "MANDATORY OPENING GREETING CONTRACT:\n"
+                        "Start the interview with a polite, professional welcome note that frames the technical inquiry around one real skill, project, or claim found in their uploaded resume or public GitHub profile.\n"
+                        "Required pattern: 'Welcome! Looking over your experience and background, you highlighted [insert one real project, skill, or achievement directly from their uploaded resume or public repository]. [Walk me through / Can you walk me through (concrete technical inquiry probing that project or skill)]?'\n\n"
+                        f"{anchor_hint}"
+                        "GROUNDING MANDATE: The project, skill, company, or metric referenced MUST come 100% verbatim from the uploaded document in the CANDIDATE DOSSIER above. Never invent metrics or copy entities from the calibration examples.\n"
+                        "DO NOT COPY CALIBRATION EXAMPLES: Under no circumstances should you cite TelemetryRouter, PostgreSQL WAL, or any entity from the calibration examples unless it appears verbatim in the candidate's uploaded resume!\n"
+                        "1-TO-1 CONSISTENCY: 'source_ref' MUST match the EXACT project or claim targeted in your question.\n"
+                        "DOMAIN RELEVANCE: Ask only about technical concepts that genuinely belong to the targeted project."
+                    )
             else:
                 instructions.append(
-                    "DECIDE_NEXT QUESTIONING & MULTI-SOURCE MANDATE:\n"
-                    "1. MULTI-SOURCE COVERAGE (RESUME & GITHUB): A complete technical interview MUST probe BOTH the candidate's uploaded resume AND their public GitHub repositories. Do not stay on resume claims or general skill questions for the entire interview.\n"
+                    "DECIDE_NEXT QUESTIONING MANDATE:\n"
+                    "1. THEMATIC DEEP-DIVE: Drill down into the active sub-memory along the rubric dimensions (clarity of framing -> methodology/wiring -> trade-offs & edge cases).\n"
                     "2. FOLLOW-UP DECISION (DRIVEN BY KEY POINTS): Never follow up mechanically, but DO ask a follow-up (turn_type='follow_up') when the candidate's last answer presents a concrete key point:\n"
                     "   - A named technology, framework, algorithm, or library explicitly mentioned in their answer that has not been deeply probed.\n"
                     "   - A quantifiable metric or scale claim (e.g. 'improved accuracy by 25%', 'reduced latency to 40ms', '20+ concurrent users').\n"
@@ -379,10 +433,7 @@ class InterviewerAgent:
                     "   - An evasive, vague, or textbook recitation that lacks hands-on code specifics.\n"
                     "   In any of these cases, use turn_type='follow_up' to probe that exact detail.\n"
                     "   STRICT FOLLOW-UP MANDATE: You must NEVER invent or attribute technologies to the candidate that they did not explicitly mention! If the candidate discussed Redis and Lua scripts, follow up on Redis or Lua; NEVER claim they mentioned Go, Goroutines, or other technologies not in their text.\n"
-                    "3. PIVOTING & DYNAMIC CONTEXT SWITCHING:\n"
-                    "   - Avoid asking more than 1 or 2 consecutive follow-ups on the same topic.\n"
-                    "   - When an answer has addressed all trade-offs or when switching context, pivot to an uncovered repository from [SOURCE 2: GITHUB PROFILE & REPOSITORIES] (set source='github', turn_type='context_switch') or to an uncovered resume achievement.\n"
-                    "   - Do NOT ask consecutive skill-anchored questions back-to-back."
+                    "3. PROGRESSION DISCIPLINE: Stay anchored in the active theme context until a theme switch is initiated."
                 )
 
         instructions.append(
@@ -445,11 +496,12 @@ class InterviewerAgent:
         # Context Initialization on Turn 1
         is_opening = not state.transcript
         if is_opening and not state.orchestration.active_context_id:
-            chosen_theme = starting_theme or random.choice(["PROFILE", "JD"])
+            chosen_theme = starting_theme or "PROFILE"
             sub = self.theme_fetcher.initialize_context(
                 theme=chosen_theme,
                 resume_text=state.resume_text,
                 github_summary=state.github_summary,
+                jd_scenarios=state.jd_scenarios,
             )
             state.sub_memories[sub.context_id] = sub
             state.orchestration.active_theme = chosen_theme
@@ -462,18 +514,31 @@ class InterviewerAgent:
                 raise ValueError("Candidate answer cannot be empty or whitespace only.")
             state.add_candidate_answer(clean_answer)
 
-        # Process JEV signal if provided
+        # Process JEV signal if provided or evaluate automatically
+        effective_signal = jev_signal
+        if effective_signal is None and not is_opening and not is_closing:
+            # Auto JEV evaluation: after 2 turns in active context, trigger a theme switch (PROFILE <-> JD)
+            if state.orchestration.turns_in_active_context >= 2:
+                effective_signal = "SWITCH_CONTEXT"
+            else:
+                effective_signal = "FOLLOW_UP"
+
         bridge_data = None
-        if jev_signal:
-            state.orchestration.last_jev_signal = jev_signal
-            if jev_signal == "SWITCH_CONTEXT":
+        if effective_signal:
+            state.orchestration.last_jev_signal = effective_signal
+            if effective_signal == "SWITCH_CONTEXT":
                 target_theme = "JD" if state.orchestration.active_theme == "PROFILE" else "PROFILE"
-                bridge_data = self.theme_fetcher.fetch_bridge_context(state, target_theme=target_theme)
+                bridge_data = self.theme_fetcher.fetch_bridge_context(
+                    state,
+                    target_theme=target_theme,
+                    jd_scenarios=state.jd_scenarios,
+                )
                 target_sub = bridge_data["target_context"]
                 state.sub_memories[target_sub.context_id] = target_sub
                 state.orchestration.active_theme = target_theme
                 state.orchestration.active_context_id = target_sub.context_id
                 state.orchestration.theme_switch_pending = True
+                state.orchestration.turns_in_active_context = 0
 
         # State: SELECT_FOCUS & ASK (Build context, query LLM, validate output)
         messages = self._build_conversation_messages(state, bridge_data=bridge_data)
@@ -484,15 +549,35 @@ class InterviewerAgent:
             model=state.model_name,
         )
 
-        # Generate turn from configured LLM
-        raw_response = await client.generate_turn(messages)
-        turn_output = InterviewerTurnOutput.model_validate(raw_response)
+        # Generate turn from configured LLM with timeout guardrail
+        call_timeout = 20.0 if state.llm_provider == "ollama" else 25.0
+        try:
+            raw_response = await asyncio.wait_for(client.generate_turn(messages), timeout=call_timeout)
+            turn_output = InterviewerTurnOutput.model_validate(raw_response)
+        except Exception as llm_err:
+            logger.warning(
+                "LLM call failed or timed out (%s). Falling back to deterministic grounded question.",
+                llm_err,
+            )
+            fallback_turn = self._generate_deterministic_fallback(state, is_opening=is_opening)
+            state.add_interviewer_question(
+                question=fallback_turn.question,
+                turn_type=fallback_turn.turn_type,
+                source=fallback_turn.source,
+                source_ref=fallback_turn.source_ref,
+                reasoning_note=fallback_turn.reasoning_note,
+            )
+            return fallback_turn
 
         # Code-Level Grounding Validation Layer
         ordering_violated = (
             is_opening
             and state.orchestration.active_theme == "PROFILE"
             and turn_output.source not in ["resume", "github"]
+        ) or (
+            is_opening
+            and state.orchestration.active_theme == "JD"
+            and turn_output.source != "jd"
         )
 
         grounded, reason = is_source_ref_grounded(
@@ -534,14 +619,19 @@ class InterviewerAgent:
                 {"role": "user", "content": correction_instruction}
             ]
 
+            retry_timeout = 10.0 if state.llm_provider == "ollama" else 15.0
             try:
-                retry_raw = await client.generate_turn(retry_messages)
+                retry_raw = await asyncio.wait_for(client.generate_turn(retry_messages), timeout=retry_timeout)
                 retry_turn = InterviewerTurnOutput.model_validate(retry_raw)
 
                 retry_ordering_violated = (
                     is_opening
                     and state.orchestration.active_theme == "PROFILE"
                     and retry_turn.source not in ["resume", "github"]
+                ) or (
+                    is_opening
+                    and state.orchestration.active_theme == "JD"
+                    and retry_turn.source != "jd"
                 )
                 retry_grounded, retry_reason = is_source_ref_grounded(
                     source_ref=retry_turn.source_ref or "",
@@ -574,6 +664,11 @@ class InterviewerAgent:
                 turn_output = self._generate_deterministic_fallback(state, is_opening)
 
         # State: Record validated turn in state machine transcript and sub-memory
+        if bridge_data and turn_output.turn_type in ("resume_claim", "github_project"):
+            turn_output.turn_type = "theme_switch"
+
+        turn_output.theme = state.orchestration.active_theme
+
         active_sub_id = state.orchestration.active_context_id
         target_dim = None
         if active_sub_id and active_sub_id in state.sub_memories:
@@ -588,6 +683,7 @@ class InterviewerAgent:
             source_ref=turn_output.source_ref,
             reasoning_note=turn_output.reasoning_note,
             rubric_dimension=target_dim,
+            theme=state.orchestration.active_theme,
         )
 
         return turn_output

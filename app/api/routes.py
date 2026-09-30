@@ -6,6 +6,7 @@ from app.agent.interviewer import InterviewerAgent
 from app.config import settings
 from app.api.models import (
     EndSessionResponse,
+    OrchestrationResponse,
     SessionSummary,
     StartSessionRequest,
     StartSessionResponse,
@@ -24,6 +25,45 @@ router = APIRouter(prefix="/session", tags=["Interview Session"])
 def get_agent() -> InterviewerAgent:
     """Dependency helper providing the InterviewerAgent instance."""
     return InterviewerAgent()
+
+
+def _build_orchestration_response(
+    state: SessionState, is_bridge: bool = False
+) -> OrchestrationResponse:
+    """Extracts live hierarchical memory, budget, and theme tracking for API responses."""
+    active_sub = (
+        state.sub_memories.get(state.orchestration.active_context_id)
+        if state.orchestration.active_context_id
+        else None
+    )
+    current_dim = (
+        active_sub.pending_dimensions[0]
+        if active_sub and active_sub.pending_dimensions
+        else None
+    )
+    sub_summaries = []
+    for sm in state.sub_memories.values():
+        status_val = "completed" if not sm.pending_dimensions else "in_progress"
+        sub_summaries.append({
+            "context_id": sm.context_id,
+            "theme": sm.theme,
+            "source_ref": sm.source_ref,
+            "status": status_val,
+            "completed_dimensions": list(sm.probed_dimensions),
+            "pending_dimensions": list(sm.pending_dimensions),
+            "turn_count": len(sm.turns),
+        })
+    return OrchestrationResponse(
+        active_theme=state.orchestration.active_theme,
+        active_context_id=state.orchestration.active_context_id or "",
+        current_rubric_dimension=current_dim,
+        is_bridge_turn=is_bridge,
+        minutes_remaining=round(state.budget.minutes_remaining, 2),
+        elapsed_minutes=round(state.budget.elapsed_minutes, 2),
+        is_closing_time=state.budget.is_closing_time,
+        sub_memories=sub_summaries,
+        globally_covered_topics=list(state.globally_covered_topics),
+    )
 
 
 @router.post(
@@ -83,9 +123,19 @@ async def start_session(
         model_name=chosen_model,
     )
 
-    # 4. Generate Opening Turn
+    # Seed custom JD scenarios or text if provided
+    if payload.jd_scenarios:
+        state.jd_scenarios = payload.jd_scenarios
+    if payload.jd_text:
+        state.jd_text = payload.jd_text
+
+    # 4. Generate Opening Turn with requested starting theme
     try:
-        turn_output = await agent.execute_turn(state, candidate_answer=None)
+        turn_output = await agent.execute_turn(
+            state,
+            candidate_answer=None,
+            starting_theme=payload.starting_theme,
+        )
     except Exception as llm_err:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -100,6 +150,7 @@ async def start_session(
         status=state.status,
         turn_index=state.turn_count,
         turn=turn_output,
+        orchestration=_build_orchestration_response(state, is_bridge=False),
     )
 
 
@@ -136,12 +187,21 @@ async def submit_answer(
         )
 
     try:
-        turn_output = await agent.execute_turn(state, candidate_answer=clean_answer)
+        turn_output = await agent.execute_turn(
+            state,
+            candidate_answer=clean_answer,
+            jev_signal=payload.jev_signal,
+        )
     except Exception as llm_err:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to generate next interviewer turn: {llm_err}",
         )
+
+    is_bridge = (
+        turn_output.turn_type == "context_switch"
+        or state.orchestration.theme_switch_pending
+    )
 
     await store.save(state)
 
@@ -150,6 +210,7 @@ async def submit_answer(
         status=state.status,
         turn_index=state.turn_count,
         turn=turn_output,
+        orchestration=_build_orchestration_response(state, is_bridge=is_bridge),
     )
 
 

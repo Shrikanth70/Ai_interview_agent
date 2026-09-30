@@ -253,17 +253,18 @@ class GitHubLoader:
                         lang = unescape(lang_m.group(1).strip()) if lang_m else "Python"
                         desc = unescape(desc_m.group(1).strip()) if desc_m else ""
                         
-                        # Try fetching raw README from GitHub CDN (not rate-limited)
+                        # Try fetching raw README from GitHub CDN (top 2 repos only, 1.5s timeout)
                         readme_text = ""
-                        for branch in ["main", "master"]:
-                            raw_url = f"https://raw.githubusercontent.com/{username}/{repo_name}/{branch}/README.md"
-                            try:
-                                raw_resp = await client.get(raw_url, timeout=3.0)
-                                if raw_resp.status_code == 200:
-                                    readme_text = clean_readme_content(raw_resp.text, max_words=800)
-                                    break
-                            except Exception:
-                                pass
+                        if len(repos_summary) < 2:
+                            for branch in ["main", "master"]:
+                                raw_url = f"https://raw.githubusercontent.com/{username}/{repo_name}/{branch}/README.md"
+                                try:
+                                    raw_resp = await client.get(raw_url, timeout=1.5)
+                                    if raw_resp.status_code == 200:
+                                        readme_text = clean_readme_content(raw_resp.text, max_words=800)
+                                        break
+                                except Exception:
+                                    pass
                         
                         repos_summary[repo_name] = {
                             "name": repo_name,
