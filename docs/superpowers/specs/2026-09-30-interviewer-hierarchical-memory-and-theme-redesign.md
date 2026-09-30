@@ -29,32 +29,40 @@ This led to several critical failure modes:
 
 ```mermaid
 flowchart TD
-    subgraph Inputs
-        R[Resume Source]
-        GH[GitHub Portfolio Source]
-        JD[JD Criteria & Scenarios]
-        RUB[Role Assessment Rubric]
+    %% Inputs & Grounding
+    G["Grounding Validation Layer<br/>(Anti-Hallucination & Fact Check)"] --> INT["Interviewer Agent"]
+    TH["Theme<br/>(PROFILE or JD)"] --> INT
+    HIST["Previous 2-3 Questions<br/>(Default Short-Term Context)"] --> INT
+
+    %% Next Question Output
+    INT --> NEXT_Q["Next Question<br/>(Emitted to Candidate)"]
+
+    %% Theme Memory Fetch Tool
+    INT --> FETCH["Theme Memory Fetch Tool<br/>(Theme: Profile vs. JD Criteria)"]
+
+    %% Branch 1: Profile (GitHub / Resume)
+    FETCH --> THEME_PROF["Theme: PROFILE<br/>(Resume / GitHub)"]
+    subgraph ProfileBranch ["Profile Deep Dive"]
+        THEME_PROF --> PICK_PROJ["Take One Project in GitHub / Resume"]
+        PICK_PROJ --> D1["Explain the Project<br/>(Problem Framing & Constraints)"]
+        D1 --> D2["Explain Architecture<br/>(Design, Wiring & Abstractions)"]
+        D2 --> D3["Trade-offs & Deep Dive (...)<br/>(Latency, Cost, Evals, Edge Cases)"]
     end
 
-    subgraph MemoryArchitecture ["Hierarchical Memory Model"]
-        SM[Global Session Memory\n- Budget & Timers (25 min limit)\n- Active Theme & Context Pointer\n- Sliding Window: Last 2-3 Q/As\n- Anti-Duplication Topic Registry]
-        SUB_P[Profile Sub-Memories\n- Per-Project/Claim Buckets\n- Probed Dimensions\n- Local Q&As & Claims]
-        SUB_JD[JD Sub-Memories\n- Per-Scenario Buckets\n- Trade-offs Explored\n- Local Q&As]
+    %% Branch 2: JD (Persona / Problem)
+    FETCH --> THEME_JD["Theme: JD<br/>(Persona / Problem)"]
+    subgraph JDBranch ["JD Criteria"]
+        THEME_JD --> JD_CRIT["Around the Criteria for a JD<br/>(Role Scenarios, Trade-offs & Approach)"]
     end
 
-    subgraph InterviewCycle ["Conversational Turn Cycle"]
-        INIT[Session Start: Random Theme Selection\nPROFILE or JD] --> FETCH[Theme Memory Fetch Tool\nRetrieve Active Slice + Target Dimension]
-        FETCH --> ASK[Interviewer Agent\nEmit Grounded Question]
-        ASK --> CAND[Candidate Submits Answer]
-        CAND --> UPDATE[Update Active Sub-Memory\n& Sliding Dialogue Window]
-        UPDATE --> JEV[Send Answer to JEV Evaluator]
-        JEV --> SIGNAL{JEV Signal}
-        SIGNAL -- FOLLOW_UP --> FETCH
-        SIGNAL -- SWITCH_CONTEXT --> BRIDGE[Generate Bridge Question\nOld Anchor + New Theme Slice]
-        BRIDGE --> SWITCH_CTX[Activate New Sub-Memory] --> FETCH
+    %% Conversational Turn Cycle & JEV
+    subgraph JEVLoop ["Conversational Turn Cycle & JEV Feedback"]
+        NEXT_Q -.-> CAND["Candidate Submits Answer"]
+        CAND -.-> JEV["JEV Evaluator"]
+        JEV -.->|"Signal: FOLLOW_UP"| INT
+        JEV -.->|"Signal: SWITCH_CONTEXT"| BRIDGE["Bridge Question Transition<br/>(Connects Previous Context ➔ New Theme)"]
+        BRIDGE -.-> INT
     end
-
-    Inputs --> MemoryArchitecture
 ```
 
 ### 2.1 The Two Themes
