@@ -83,29 +83,124 @@ At session initialization, the agent randomly picks either `PROFILE` or `JD` as 
 
 ---
 
-## 3. The Conversational Turn Loop & External Signals
+## 3. Next Question Generation Engine & Conversational Loop
 
-### 3.1 JEV Handshake (Evaluator / Supervisor)
-The internal `interviewer.py` state machine does not make subjective follow-up decisions alone. After the candidate submits an answer, the answer and turn metadata are submitted to the external `jev` evaluator.
+### 3.1 Next Question Generation Architecture Flowchart
 
-`jev` returns one of two actionable signals:
-1. `FOLLOW_UP`: The candidate's answer introduces concrete technical points or lacks architectural depth. The Interviewer remains in the current sub-memory and probes deeper using the previous 2–3 Q/As as short-term context.
-2. `SWITCH_CONTEXT`: The active project or scenario is sufficiently exhausted. The agent must pivot to a new project or switch themes.
+```mermaid
+flowchart TD
+    %% Decision Inputs
+    subgraph Inputs ["Question Generation Inputs"]
+        SIG["JEV Evaluator Signal<br/>(FOLLOW_UP or SWITCH_CONTEXT)"]
+        DIM["Next Rubric Dimension<br/>(Framing ➔ Architecture ➔ Trade-offs)"]
+        HOOK["Candidate Answer Hook<br/>(Explicit tool/algorithm/metric from last 2-3 turns)"]
+        ANTIDUP["Anti-Duplication Registry<br/>(Negative Filter: Never repeat exhausted topics)"]
+        TIMER["Session Budget Check<br/>(Elapsed Time & Turn Counter)"]
+    end
 
-### 3.2 Bridge Questions (Context Switching)
-When `jev` signals `SWITCH_CONTEXT`, the agent transitions using a **Bridge Question** instead of making an abrupt, disjointed jump.
+    %% Check Budget First
+    TIMER --> CLOCK_GATE{"Elapsed ≥ 22m<br/>OR Turn ≥ 11?"}
+    CLOCK_GATE -- Yes --> CLOSE["Emit Graceful Closing Turn<br/>(Conclude Session)"]
 
-- **Profile $\rightarrow$ JD Bridge Example**:
-  *"In your `distributed-cache` repo, you implemented a probabilistic early expiration algorithm to mitigate cache stampedes. In our ingestion pipeline, we deal with severe traffic surges where cache misses can cascade to downstream databases. How would you adapt your caching approach to protect our services under those conditions?"*
-- **Resume $\rightarrow$ GitHub Bridge Example**:
-  *"On your resume you highlighted reducing p99 latency by 35% on an analytics ingestion service. Looking at your `fast-analytics` repository, how did your custom ring buffer design directly deliver that 35% improvement?"*
+    CLOCK_GATE -- No --> SIGNAL_GATE{"JEV Signal?"}
 
-### 3.3 The 25-Minute Session Budget Guardrail
-- **Target Session Duration**: $\le 25$ minutes total (approximately 10–12 conversational turns).
-- **Time Check**: At the start of every turn:
-  $$\text{elapsed\_time} = \text{now}() - \text{start\_time}$$
-- If $\text{elapsed\_time} \ge 22\text{ minutes}$ OR $\text{turn\_count} \ge 11$, any `FOLLOW_UP` or `SWITCH_CONTEXT` signal is overridden by a `CLOSING` action.
-- The Interviewer produces a professional closing turn thanking the candidate and concluding the interview.
+    %% Branch: Follow-Up
+    SIGNAL_GATE -- "FOLLOW_UP" --> F_PROMPT["Formulate Deep-Dive Follow-Up<br/>- Target active Sub-Memory slice<br/>- Probe candidate hook against next rubric dimension"]
+
+    %% Branch: Switch Context / Bridge
+    SIGNAL_GATE -- "SWITCH_CONTEXT" --> B_PROMPT["Formulate Bridge Question<br/>- Link previous project anchor to new theme/scenario<br/>- Transition active context pointer"]
+
+    %% Grounding Validation Gate
+    F_PROMPT --> GROUND["Grounding Validation Layer<br/>(Verify existence in source & transcript attribution)"]
+    B_PROMPT --> GROUND
+
+    GROUND --> CHECK{"Passes Grounding?"}
+    CHECK -- Yes --> EMIT["Emit Question to Candidate<br/>& Update Active Sub-Memory + Window"]
+    CHECK -- No (Retry/Fallback) --> RETRY["Retry with Correction Prompt<br/>or Fallback to Deterministic Target"] --> EMIT
+```
+
+---
+
+### 3.2 How the Agent Asks the Starting Question (Turn 1)
+
+At session initialization, the agent randomly selects between `PROFILE` and `JD`.
+
+#### Case A: If Starting Theme is `PROFILE`
+1. The **Theme Memory Fetch Tool** selects a primary anchor from the candidate's real portfolio (e.g. their top GitHub repository or a flagship resume claim).
+2. It initializes `ProfileSubMemory` for that project and targets the first rung of the rubric: **`Explain the Project` (`clarity_of_framing`)**.
+3. It emits an opening greeting adhering to the **Opening Greeting Contract**:
+   > *"Welcome! To kick off our technical conversation today, looking over your background I noticed your project **`distributed-cache`**. Could you walk me through the core problem this project was designed to solve and the primary technical constraints you had to design around?"*
+
+#### Case B: If Starting Theme is `JD`
+1. The **Theme Memory Fetch Tool** selects a prioritized problem scenario from the role criteria catalog (e.g., *low-latency distributed ingestion*).
+2. It initializes `JdSubMemory` and presents a realistic engineering challenge without reciting raw JD bullet points:
+   > *"Welcome! To start off our discussion today, in this role we frequently design systems that require low-latency ingestion under heavy write concurrency. If you were tasked with building an in-memory stream buffer from scratch under those constraints, walk me through how you'd frame the problem and what high-level architecture you would establish."*
+
+---
+
+### 3.3 The Critical Role of Grounding
+
+The **Grounding Validation Layer** (`app/agent/grounding.py`) operates as an automated, code-level anti-hallucination guard on every turn before a question reaches the candidate:
+
+1. **On the Starting Question**:
+   - **Entity & Source Verification**: Ensures that any repository, library, company, or metric in the question exists **verbatim** in the candidate's uploaded dossier (`resume_text` or `github_summary`).
+   - **Anti-Context Fabrication**: Rejects questions that invent unestablished systems (e.g. claiming the candidate built a Kubernetes pipeline when none exists).
+2. **On Follow-Up Questions (Transcript Attribution Isolation)**:
+   - **Strict Candidate Attribution**: When formulating follow-ups (e.g., *"You mentioned using Redis and Lua scripts..."*), Grounding checks the verbatim text of prior candidate turns in the transcript.
+   - If the candidate mentioned Redis, the question passes.
+   - If the LLM hallucinated that the candidate mentioned Kafka or Go, Grounding **rejects the turn**, logs the violation, and triggers an automated correction retry or deterministic fallback.
+
+---
+
+### 3.4 How Follow-Up Questions are Formulated
+
+When the candidate answers and `jev` returns `signal: "FOLLOW_UP"`, the interviewer formulates the next inquiry using three sequential steps:
+
+1. **Short-Term Context Hook**:
+   - The agent inspects the candidate's latest answer in `recent_dialogue_window`.
+   - It extracts a **concrete technical hook**: a named algorithm, concurrency pattern, architecture choice, or metric (e.g., *"We used mutex locks with a TTL wheel to prevent race conditions"*).
+2. **Advancing the Rubric Progression Ladder**:
+   - The sub-memory marks the previous dimension (e.g. `clarity_of_framing`) as completed.
+   - It targets the next dimension in `pending_dimensions`:
+     - Step 1: `Explain the project` (`clarity_of_framing` - problem & constraints).
+     - Step 2: `Explain architecture` (`methodology_depth`, `ai_tool_integration` - component wiring, abstractions).
+     - Step 3: `Trade-offs & Edge Cases` (`feasibility`, `ml_technical_depth` - latency, cost, evaluations, failure modes).
+3. **Approach-Based Inquiry (No Textbook Trivia)**:
+   - The agent strictly avoids basic definition questions (*"What is a mutex?"*).
+   - Instead, it probes the candidate's specific implementation rationale and edge cases:
+   > *"You mentioned using a key-level mutex lock with a TTL wheel to prevent race conditions. How did you structure the locking granularity so that concurrent reads weren't blocked during background eviction cycles?"*
+
+---
+
+### 3.5 On What Basis is the Next Question Generated? (The 5 Deterministic Bases)
+
+Every generated question is governed by five deterministic inputs:
+
+1. **JEV Evaluator Signal (`FOLLOW_UP` vs `SWITCH_CONTEXT`)**:
+   - Governs **breadth vs. depth**: whether to drill deeper into the active sub-memory or execute a cross-context bridge.
+2. **Rubric Dimension Progression Ladder**:
+   - Governs **the angle of inquiry**: systematically advancing from problem framing $\rightarrow$ architecture design $\rightarrow$ trade-offs and failure mitigations.
+3. **Candidate Answer Hook**:
+   - Governs **the conversational anchor**: questions latch directly onto concrete tools, algorithms, or numbers the candidate just articulated in the last 1–2 turns.
+4. **Global Anti-Duplication Index (`covered_topics`)**:
+   - Governs **negative constraints**: acts as an off-limits filter, guaranteeing that topics thoroughly explored in earlier turns (e.g. Redis caching) are never re-asked in subsequent contexts.
+5. **Session Budget & Clock Guardrail**:
+   - Governs **session conclusion**: at elapsed time $\ge 22$ minutes or turn $\ge 11$, all thematic branching is overridden, and the agent generates the graceful closing turn.
+
+---
+
+### 3.6 JEV Handshake & Bridge Transitions
+
+1. **JEV Handshake**:
+   - Following every candidate answer, the turn metadata, question, and answer are transmitted to `jev`.
+   - `jev` evaluates technical depth and returns either `FOLLOW_UP` or `SWITCH_CONTEXT`.
+2. **Bridge Questions on Context Switch**:
+   - When `SWITCH_CONTEXT` is received, the agent does not jump abruptly.
+   - It generates a **Bridge Question** synthesizing the candidate's prior decisions with the new theme or project:
+   - *Example (Profile $\rightarrow$ JD)*:  
+     *"In your `distributed-cache` repo, you implemented probabilistic early expiration to mitigate cache stampedes. In our ingestion pipeline, we deal with severe traffic surges where cache misses can cascade to downstream databases. How would you adapt your caching approach to protect our services under those conditions?"*
+   - *Example (Resume $\rightarrow$ GitHub)*:  
+     *"On your resume you highlighted reducing p99 latency by 35% on an analytics ingestion service. Looking at your `fast-analytics` repository, how did your custom ring buffer design directly deliver that 35% improvement?"*
 
 ---
 
