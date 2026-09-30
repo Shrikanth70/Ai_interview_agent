@@ -340,9 +340,12 @@ def is_source_ref_grounded(
 
     clean_ref = source_ref.strip()
 
-    # 1. Closing turns are self-contained session conclusions
+    # 1. Closing turns are self-contained session conclusions, and JD turns test problem-solving scenarios
     if turn_type == "closing" or clean_ref.lower() in ("session_completion", "session completion", "closing"):
         return True, "closing turn reference is valid"
+
+    if source == "jd" or clean_ref.lower().startswith("jd:"):
+        return True, "jd scenario reference is valid"
 
     # 2. Follow-up turns referencing candidate's prior answer
     if turn_type == "follow_up" or clean_ref.lower().startswith("prior_answer") or clean_ref.lower().startswith("prior answer"):

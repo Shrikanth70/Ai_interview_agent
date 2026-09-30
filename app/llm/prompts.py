@@ -219,3 +219,46 @@ def calculate_source_nudge(
             )
 
     return None
+
+
+def format_scoped_turn_prompt(
+    theme: str,
+    source_ref: str,
+    source_slice: Dict[str, Any],
+    next_dimension: str,
+    anti_duplication: List[str],
+) -> str:
+    """Builds a compact (~800 token) instruction focusing strictly on active slice and next dimension."""
+    antidup_block = ""
+    if anti_duplication:
+        antidup_block = f"\nOFF-LIMITS TOPICS (Already covered, do not re-probe): {', '.join(anti_duplication)}\n"
+
+    return (
+        f"--- ACTIVE CONTEXT ---\n"
+        f"THEME: {theme}\n"
+        f"TARGET FOCUS: {source_ref}\n"
+        f"SOURCE DETAILS: {source_slice}\n"
+        f"TARGET RUBRIC DIMENSION: {next_dimension}\n"
+        f"{antidup_block}\n"
+        f"INSTRUCTION: Ask a specific, hands-on technical question evaluating the candidate's '{next_dimension}'. "
+        f"Probe their concrete decisions, architecture, and trade-offs. Avoid generic definitions."
+    )
+
+
+def format_bridge_turn_prompt(
+    anchor_ref: str,
+    anchor_slice: Dict[str, Any],
+    target_theme: str,
+    target_ref: str,
+    target_slice: Dict[str, Any],
+) -> str:
+    """Builds instructions for constructing a smooth bridge question connecting past work to new scenario."""
+    return (
+        f"--- BRIDGE TRANSITION MANDATE ---\n"
+        f"PREVIOUS CONTEXT: {anchor_ref} ({anchor_slice})\n"
+        f"UPCOMING THEME: {target_theme} - {target_ref}\n"
+        f"UPCOMING SCENARIO: {target_slice}\n\n"
+        f"INSTRUCTION: Seamlessly bridge the conversation. Verbally connect the candidate's approach or decisions "
+        f"in '{anchor_ref}' to the upcoming scenario in '{target_ref}'. Ask how their experience in the former "
+        f"informs their architecture or trade-offs in the latter."
+    )
