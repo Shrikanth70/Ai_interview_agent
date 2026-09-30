@@ -1,4 +1,5 @@
 import logging
+import random
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
@@ -7,14 +8,17 @@ from app.agent.grounding import (
     extract_deterministic_fallback_target,
     is_source_ref_grounded,
 )
+from app.agent.theme_fetcher import ThemeMemoryFetchTool
 from app.config import settings
 from app.llm.client import LLMClient
 from app.llm.prompts import (
     FEW_SHOT_EXAMPLES,
     MASTER_SYSTEM_PROMPT,
     calculate_source_nudge,
+    format_bridge_turn_prompt,
     format_covered_refs,
     format_dossier,
+    format_scoped_turn_prompt,
 )
 from app.session.state import SessionState
 
@@ -39,7 +43,7 @@ class InterviewerTurnOutput(BaseModel):
         ...,
         description="Intent of the turn.",
     )
-    source: Optional[Literal["resume", "github"]] = Field(
+    source: Optional[Literal["resume", "github", "jd"]] = Field(
         default="resume",
         description="Knowledge source grounding this question.",
     )
@@ -92,6 +96,8 @@ class InterviewerTurnOutput(BaseModel):
         cleaned = v.strip().lower()
         if "github" in cleaned:
             return "github"
+        if "jd" in cleaned:
+            return "jd"
         if "resume" in cleaned:
             return "resume"
         return "resume"
@@ -116,6 +122,7 @@ class InterviewerAgent:
 
     def __init__(self, llm_client: Optional[LLMClient] = None):
         self._custom_llm_client = llm_client
+        self.theme_fetcher = ThemeMemoryFetchTool()
 
     def _generate_deterministic_fallback(
         self, state: SessionState, is_opening: bool
@@ -226,7 +233,9 @@ class InterviewerAgent:
         )
 
     def _build_conversation_messages(
-        self, state: SessionState
+        self,
+        state: SessionState,
+        bridge_data: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, str]]:
         """Assembles the complete OpenAI-compatible prompt payload."""
         messages: List[Dict[str, str]] = []
@@ -276,7 +285,11 @@ class InterviewerAgent:
 
         # 4. Final Instruction for the upcoming turn
         instructions = []
-        is_closing = state.turn_count >= settings.MAX_SESSION_TURNS - 1
+        is_closing = (
+            state.budget.is_closing_time
+            or state.turn_count >= state.budget.max_turns - 1
+            or state.turn_count >= settings.MAX_SESSION_TURNS - 1
+        )
         if is_closing:
             instructions.append(
                 "MANDATE: The interview session has reached its maximum allocated turns. "
@@ -300,6 +313,40 @@ class InterviewerAgent:
             if nudge:
                 instructions.append(nudge)
 
+            if bridge_data:
+                target_ctx = bridge_data.get("target_context")
+                target_ref = (
+                    getattr(target_ctx, "source_ref", "Upcoming Scenario")
+                    if target_ctx
+                    else "Upcoming Scenario"
+                )
+                instructions.append(
+                    format_bridge_turn_prompt(
+                        anchor_ref=bridge_data.get("anchor_source_ref", "Previous Project"),
+                        anchor_slice=bridge_data.get("anchor_slice", {}),
+                        target_theme=bridge_data.get("target_theme", "JD"),
+                        target_ref=target_ref,
+                        target_slice=bridge_data.get("target_slice", {}),
+                    )
+                )
+            elif state.orchestration.active_context_id:
+                active_sub = state.sub_memories.get(state.orchestration.active_context_id)
+                if active_sub:
+                    next_dim = (
+                        active_sub.pending_dimensions[0]
+                        if active_sub.pending_dimensions
+                        else "methodology_depth"
+                    )
+                    instructions.append(
+                        format_scoped_turn_prompt(
+                            theme=active_sub.theme,
+                            source_ref=active_sub.source_ref,
+                            source_slice=active_sub.source_slice,
+                            next_dimension=next_dim,
+                            anti_duplication=state.globally_covered_topics,
+                        )
+                    )
+
             if not state.transcript:
                 anchors = extract_candidate_anchors(state.resume_text)
                 anchor_hint = ""
@@ -313,12 +360,11 @@ class InterviewerAgent:
                 instructions.append(
                     "You are generating the OPENING question (Turn 1).\n"
                     "MANDATORY OPENING GREETING CONTRACT:\n"
-                    "Start the interview with a polite, professional welcome note that frames the technical inquiry around one real skill, project, or claim found in their uploaded resume.\n"
-                    "Required pattern: 'Welcome! Looking over your experience and background, you highlighted [insert one real project, skill, or achievement directly from their uploaded resume]. [Walk me through / Can you walk me through (concrete technical inquiry probing that project or skill)]?'\n\n"
+                    "Start the interview with a polite, professional welcome note that frames the technical inquiry around one real skill, project, or claim found in their uploaded resume or public GitHub profile.\n"
+                    "Required pattern: 'Welcome! Looking over your experience and background, you highlighted [insert one real project, skill, or achievement directly from their uploaded resume or public repository]. [Walk me through / Can you walk me through (concrete technical inquiry probing that project or skill)]?'\n\n"
                     f"{anchor_hint}"
                     "GROUNDING MANDATE: The project, skill, company, or metric referenced MUST come 100% verbatim from the uploaded document in the CANDIDATE DOSSIER above. Never invent metrics or copy entities from the calibration examples.\n"
                     "DO NOT COPY CALIBRATION EXAMPLES: Under no circumstances should you cite TelemetryRouter, PostgreSQL WAL, or any entity from the calibration examples unless it appears verbatim in the candidate's uploaded resume!\n"
-                    "ORDERING MANDATE: Turn 1 MUST have source='resume'. Do not ask about GitHub projects on Turn 1.\n"
                     "1-TO-1 CONSISTENCY: 'source_ref' MUST match the EXACT project or claim targeted in your question.\n"
                     "DOMAIN RELEVANCE: Ask only about technical concepts that genuinely belong to the targeted project."
                 )
@@ -355,13 +401,59 @@ class InterviewerAgent:
         return messages
 
     async def execute_turn(
-        self, state: SessionState, candidate_answer: Optional[str] = None
+        self,
+        state: SessionState,
+        candidate_answer: Optional[str] = None,
+        jev_signal: Optional[Literal["FOLLOW_UP", "SWITCH_CONTEXT"]] = None,
+        starting_theme: Optional[Literal["PROFILE", "JD"]] = None,
     ) -> InterviewerTurnOutput:
         """Executes a single conversational cycle in the state machine with code-level grounding validation."""
         if state.status == "completed":
             raise ValueError(
                 f"Session '{state.session_id}' is already completed. Cannot generate new turns."
             )
+
+        # Budget & Turn Limit Guardrail (25-minute limit)
+        is_closing = (
+            state.budget.is_closing_time
+            or state.turn_count >= state.budget.max_turns - 1
+            or state.turn_count >= settings.MAX_SESSION_TURNS - 1
+        )
+
+        if is_closing:
+            closing_question = (
+                "Thank you so much for sharing your technical background, architectural decisions, "
+                "and problem-solving trade-offs with me today. That concludes our interview! "
+                "Do you have any questions for me before we wrap up?"
+            )
+            turn_output = InterviewerTurnOutput(
+                question=closing_question,
+                turn_type="closing",
+                source="resume",
+                source_ref="Closing",
+                reasoning_note="Session budget or turn limit reached. Concluding interview gracefully.",
+            )
+            state.add_interviewer_question(
+                question=turn_output.question,
+                turn_type="closing",
+                source="resume",
+                source_ref="Closing",
+                reasoning_note=turn_output.reasoning_note,
+            )
+            return turn_output
+
+        # Context Initialization on Turn 1
+        is_opening = not state.transcript
+        if is_opening and not state.orchestration.active_context_id:
+            chosen_theme = starting_theme or random.choice(["PROFILE", "JD"])
+            sub = self.theme_fetcher.initialize_context(
+                theme=chosen_theme,
+                resume_text=state.resume_text,
+                github_summary=state.github_summary,
+            )
+            state.sub_memories[sub.context_id] = sub
+            state.orchestration.active_theme = chosen_theme
+            state.orchestration.active_context_id = sub.context_id
 
         # State: LISTEN (Ingest candidate's answer if provided)
         if candidate_answer is not None:
@@ -370,8 +462,21 @@ class InterviewerAgent:
                 raise ValueError("Candidate answer cannot be empty or whitespace only.")
             state.add_candidate_answer(clean_answer)
 
+        # Process JEV signal if provided
+        bridge_data = None
+        if jev_signal:
+            state.orchestration.last_jev_signal = jev_signal
+            if jev_signal == "SWITCH_CONTEXT":
+                target_theme = "JD" if state.orchestration.active_theme == "PROFILE" else "PROFILE"
+                bridge_data = self.theme_fetcher.fetch_bridge_context(state, target_theme=target_theme)
+                target_sub = bridge_data["target_context"]
+                state.sub_memories[target_sub.context_id] = target_sub
+                state.orchestration.active_theme = target_theme
+                state.orchestration.active_context_id = target_sub.context_id
+                state.orchestration.theme_switch_pending = True
+
         # State: SELECT_FOCUS & ASK (Build context, query LLM, validate output)
-        messages = self._build_conversation_messages(state)
+        messages = self._build_conversation_messages(state, bridge_data=bridge_data)
 
         # Resolve LLM client (custom or per-session provider/model)
         client = self._custom_llm_client or LLMClient(
@@ -384,10 +489,11 @@ class InterviewerAgent:
         turn_output = InterviewerTurnOutput.model_validate(raw_response)
 
         # Code-Level Grounding Validation Layer
-        is_opening = not state.transcript
-
-        # Ordering Rule: Turn 1 must always be sourced from the resume
-        ordering_violated = is_opening and turn_output.source != "resume"
+        ordering_violated = (
+            is_opening
+            and state.orchestration.active_theme == "PROFILE"
+            and turn_output.source not in ["resume", "github"]
+        )
 
         grounded, reason = is_source_ref_grounded(
             source_ref=turn_output.source_ref or "",
@@ -400,7 +506,7 @@ class InterviewerAgent:
         )
 
         if ordering_violated or not grounded:
-            fail_reason = "Turn 1 source must be 'resume'" if ordering_violated else reason
+            fail_reason = "Turn 1 source must be 'resume' or 'github'" if ordering_violated else reason
             logger.warning(
                 "Grounding validation FAILED on turn %s (attempt 1). Reason: %s. Question: '%s' | source_ref: '%s'. Retrying once with explicit correction...",
                 state.turn_count + 1,
@@ -414,7 +520,7 @@ class InterviewerAgent:
                 f"CRITICAL GROUNDING ERROR: Your previous question referenced '{turn_output.source_ref}', "
                 f"which was rejected because: {fail_reason}. "
                 "You must generate a new question using ONLY content verifiably present in the source material above. "
-                + ("REMINDER: The opening turn (Turn 1) MUST be sourced from the resume." if is_opening else "")
+                + ("REMINDER: The opening turn (Turn 1) MUST be sourced from the resume or a public github repo." if is_opening else "")
             )
             # If the rejected turn targeted GitHub or failed on a repository reference, provide the exact valid repository list
             if (turn_output.source == "github" or "github" in str(fail_reason).lower()) and state.github_summary.get("repos"):
@@ -432,7 +538,11 @@ class InterviewerAgent:
                 retry_raw = await client.generate_turn(retry_messages)
                 retry_turn = InterviewerTurnOutput.model_validate(retry_raw)
 
-                retry_ordering_violated = is_opening and retry_turn.source != "resume"
+                retry_ordering_violated = (
+                    is_opening
+                    and state.orchestration.active_theme == "PROFILE"
+                    and retry_turn.source not in ["resume", "github"]
+                )
                 retry_grounded, retry_reason = is_source_ref_grounded(
                     source_ref=retry_turn.source_ref or "",
                     source=retry_turn.source or "resume",
@@ -452,7 +562,7 @@ class InterviewerAgent:
                     )
                     turn_output = retry_turn
                 else:
-                    retry_fail_reason = "Turn 1 source must be 'resume'" if retry_ordering_violated else retry_reason
+                    retry_fail_reason = "Turn 1 source must be 'resume' or 'github'" if retry_ordering_violated else retry_reason
                     logger.error(
                         "Grounding validation FAILED on retry (attempt 2) for turn %s. Reason: %s. Falling back to deterministic app-layer question.",
                         state.turn_count + 1,
@@ -463,14 +573,23 @@ class InterviewerAgent:
                 logger.error("Error during grounding retry generation: %s. Falling back to deterministic question.", err)
                 turn_output = self._generate_deterministic_fallback(state, is_opening)
 
-        # State: Record validated turn in state machine transcript and covered_refs
+        # State: Record validated turn in state machine transcript and sub-memory
+        active_sub_id = state.orchestration.active_context_id
+        target_dim = None
+        if active_sub_id and active_sub_id in state.sub_memories:
+            active_sub = state.sub_memories[active_sub_id]
+            if active_sub.pending_dimensions:
+                target_dim = active_sub.pending_dimensions[0]
+
         state.add_interviewer_question(
             question=turn_output.question,
             turn_type=turn_output.turn_type,
             source=turn_output.source,
             source_ref=turn_output.source_ref,
             reasoning_note=turn_output.reasoning_note,
+            rubric_dimension=target_dim,
         )
 
         return turn_output
+
 
