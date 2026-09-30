@@ -1,37 +1,39 @@
 import json
 from pathlib import Path
+import random
+from typing import Any, Dict, List, Optional
 import httpx
 import streamlit as st
 
 # Page Configuration
 st.set_page_config(
-    page_title="AI Technical Interview Agent",
+    page_title="AI Technical Interview Agent — 2-Theme Hierarchical Engine",
     page_icon="🎙️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS for modern styling
+# Custom Styling (Dark-mode modern theme with badges, metrics & cards)
 st.markdown(
     """
     <style>
     .main-header {
-        font-size: 2rem;
+        font-size: 1.8rem;
         font-weight: 700;
         margin-bottom: 0.2rem;
+        letter-spacing: -0.02em;
     }
     .sub-header {
-        font-size: 1rem;
-        color: #6c757d;
-        margin-bottom: 1.5rem;
+        font-size: 0.95rem;
+        color: #94a3b8;
+        margin-bottom: 1.2rem;
     }
-    .meta-box {
-        background-color: rgba(240, 242, 246, 0.5);
-        border-left: 3px solid #0d6efd;
-        padding: 8px 12px;
-        margin-top: 6px;
-        border-radius: 4px;
-        font-size: 0.85rem;
+    .theme-card {
+        background: #111827;
+        border: 1px solid #1e293b;
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin-bottom: 14px;
     }
     .tag-badge {
         display: inline-block;
@@ -41,30 +43,82 @@ st.markdown(
         font-size: 0.75rem;
         margin-right: 6px;
     }
-    .tag-resume {
-        background-color: #e3f2fd;
-        color: #0d47a1;
-        border: 1px solid #bbdefb;
+    .badge-profile {
+        background-color: rgba(139, 92, 246, 0.15);
+        color: #a78bfa;
+        border: 1px solid #8b5cf6;
     }
-    .tag-github {
-        background-color: #f3e5f5;
-        color: #4a148c;
-        border: 1px solid #e1bee7;
+    .badge-jd {
+        background-color: rgba(16, 185, 129, 0.15);
+        color: #34d399;
+        border: 1px solid #10b981;
     }
-    .tag-followup {
-        background-color: #fff3e0;
-        color: #e65100;
-        border: 1px solid #ffe0b2;
+    .badge-bridge {
+        background-color: rgba(245, 158, 11, 0.15);
+        color: #fbbf24;
+        border: 1px solid #f59e0b;
     }
-    .tag-switch {
-        background-color: #e8f5e9;
-        color: #1b5e20;
-        border: 1px solid #c8e6c9;
+    .bridge-banner {
+        background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(139, 92, 246, 0.12));
+        border-left: 4px solid #f59e0b;
+        padding: 10px 14px;
+        border-radius: 6px;
+        margin: 8px 0;
+        font-size: 0.88rem;
+    }
+    .rubric-pill {
+        display: inline-block;
+        font-size: 0.72rem;
+        padding: 2px 6px;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.06);
+        color: #93c5fd;
+        margin-right: 4px;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+# Preloaded Enterprise Job Description Scenarios
+DEFAULT_JD_SCENARIOS = [
+    {
+        "scenario_id": "high_throughput_ingestion",
+        "title": "High-Throughput Stream Ingestion",
+        "problem_statement": (
+            "In this role, we handle massive traffic surges where real-time telemetry "
+            "must be buffered without dropping data or exhausting memory."
+        ),
+        "key_trade_offs": [
+            "memory bounds vs. message loss",
+            "synchronous vs. asynchronous commit",
+        ],
+    },
+    {
+        "scenario_id": "distributed_caching_and_stampedes",
+        "title": "Low-Latency Distributed Caching",
+        "problem_statement": (
+            "Our backend experiences concurrent cache miss stampedes during flash sales, "
+            "causing database CPU spikes."
+        ),
+        "key_trade_offs": [
+            "probabilistic expiration vs. mutex locking",
+            "eventual vs. strong consistency",
+        ],
+    },
+    {
+        "scenario_id": "event_driven_microservices",
+        "title": "Distributed Transaction Consistency",
+        "problem_statement": (
+            "Our payment and fulfillment services require atomic transactions across decoupled "
+            "services without blocking on two-phase commit."
+        ),
+        "key_trade_offs": [
+            "saga pattern orchestrator vs. choreographing events",
+            "idempotency keys vs. distributed locks",
+        ],
+    },
+]
 
 # State Initialization
 if "session_id" not in st.session_state:
@@ -75,6 +129,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "covered_refs" not in st.session_state:
     st.session_state.covered_refs = []
+if "orchestration" not in st.session_state:
+    st.session_state.orchestration = None
 if "summary" not in st.session_state:
     st.session_state.summary = None
 
@@ -90,47 +146,45 @@ def check_backend(base_url: str) -> bool:
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.title("🎙️ Interview Controls")
+    st.title("🎙️ Interviewer Control")
 
     # Backend Connection
-    api_url = st.text_input("Backend API URL", value="http://127.0.0.1:8000")
+    api_url = st.text_input("FastAPI Backend URL", value="http://127.0.0.1:8000")
     is_online = check_backend(api_url)
 
     if is_online:
         st.caption("🟢 **Backend Connected** (`/health` OK)")
     else:
-        st.error("🔴 **Backend Offline** - Make sure FastAPI server is running (`uvicorn app.main:app`)")
+        st.error("🔴 **Backend Offline** — Start backend: `uvicorn app.main:app --port 8000`")
 
     st.divider()
 
     # Session Status Indicator
     status_label = {
-        "idle": "⚪ Not Started",
+        "idle": "⚪ Setup & Idle",
         "active": "🟢 Interview In Progress",
-        "completed": "🏁 Interview Completed",
+        "completed": "🏁 Interview Concluded",
     }.get(st.session_state.status, "⚪ Idle")
 
     st.subheader(f"Status: {status_label}")
     if st.session_state.session_id:
         st.code(f"Session: {st.session_state.session_id[:8]}...", language="text")
 
-    # Candidate Ingestion Form
+    # Setup Form (When Idle)
     if st.session_state.status == "idle":
-        st.subheader("LLM Provider")
+        st.subheader("1. LLM Engine Provider")
         llm_provider_choice = st.radio(
             "Select Provider",
-            ["Mock LLM (Instant Demo)", "OpenRouter (Cloud)", "Ollama (Local)"],
+            ["Mock LLM (Fast & Reliable)", "Ollama (Local Offline)", "OpenRouter (Cloud)"],
             index=0,
-            horizontal=False,
         )
 
-        def get_ollama_models() -> list[str]:
+        def get_ollama_models() -> List[str]:
             for endpoint in ["http://127.0.0.1:11434", "http://localhost:11434"]:
                 try:
                     resp = httpx.get(f"{endpoint}/api/tags", timeout=2.0)
                     if resp.status_code == 200:
                         raw_models = [m["name"] for m in resp.json().get("models", [])]
-                        # Put truly local models first; push :cloud models to the end
                         local = [m for m in raw_models if not m.endswith(":cloud")]
                         cloud = [m for m in raw_models if m.endswith(":cloud")]
                         return local + cloud
@@ -139,62 +193,43 @@ with st.sidebar:
             return []
 
         local_models = []
-        if llm_provider_choice == "Mock LLM (Instant Demo)":
+        if llm_provider_choice == "Mock LLM (Fast & Reliable)":
             chosen_provider = "mock"
             chosen_model = "mock-interview-agent"
-            st.caption("⚡ Realistic structured interviewer with zero setup/keys required.")
-        elif llm_provider_choice == "Ollama (Local)":
+            st.caption("⚡ Zero latency, reproducible structured questions.")
+        elif llm_provider_choice == "Ollama (Local Offline)":
             chosen_provider = "ollama"
             local_models = get_ollama_models()
             if local_models:
-                # Find best available local model
                 best_default = 0
-                preferred_order = [
-                    "llama3.2:latest",
-                    "llama3.2",
-                    "gemma4:latest",
-                    "llama3.1:latest",
-                    "llama3.1",
-                    "llama3:latest",
-                    "llama3",
-                ]
-                for pref in preferred_order:
+                for pref in ["llama3.2:latest", "llama3.2", "gemma4:latest", "llama3.1:latest", "llama3.1"]:
                     if pref in local_models:
                         best_default = local_models.index(pref)
                         break
-
-                chosen_model = st.selectbox(
-                    "Ollama Model", local_models, index=best_default
-                )
-                if chosen_model.endswith(":cloud"):
-                    st.warning("⚠️ This is an Ollama Cloud model and requires authentication ('ollama login'). Switch to a local model like 'llama3.2:latest' if not logged in.")
-                else:
-                    st.caption("🟢 Local offline Ollama model ready.")
+                chosen_model = st.selectbox("Ollama Model", local_models, index=best_default)
             else:
                 chosen_model = st.text_input("Ollama Model", value="llama3.2:latest")
-                st.error("⚠️ Cannot connect to Ollama at http://127.0.0.1:11434. Ensure Ollama is running ('ollama serve') and a model is pulled.")
+                st.warning("Ensure Ollama is running (`ollama serve`).")
         else:
             chosen_provider = "openrouter"
-            chosen_model = st.text_input(
-                "OpenRouter Model", value="anthropic/claude-3.5-sonnet"
-            )
+            chosen_model = st.text_input("OpenRouter Model", value="anthropic/claude-3.5-sonnet")
             st.caption("Requires `OPENROUTER_API_KEY` in `.env`.")
 
         st.divider()
-        st.subheader("Candidate Dossier Setup")
+
+        st.subheader("2. Candidate Profile (Theme 1)")
         github_input = st.text_input(
-            "GitHub Username or Profile URL",
+            "GitHub Handle or Profile URL",
             value="octocat",
-            help="Enter public handle (e.g. 'octocat') or full URL (e.g. 'https://github.com/octocat')",
+            help="Candidate public GitHub username (e.g. 'octocat')",
         )
         use_mock_git = st.checkbox(
-            "Use Mock GitHub Portfolio (Fast & Rate-limit Free)",
+            "Use Mock GitHub Portfolio",
             value=True,
-            help="Provides immediate access to mock projects without hitting GitHub API rate limits.",
+            help="Avoids hitting GitHub REST API rate limits during testing.",
         )
 
-        # Resume input options
-        resume_mode = st.radio("Resume Input Method", ["Sample Resume", "Upload File", "Paste Text"], horizontal=True)
+        resume_mode = st.radio("Resume Source", ["Sample Resume", "Upload File", "Paste Text"], horizontal=True)
         resume_text_to_send = ""
         resume_file_to_send = None
 
@@ -202,13 +237,12 @@ with st.sidebar:
             sample_path = Path("sample_resume.txt")
             if sample_path.exists():
                 resume_text_to_send = sample_path.read_text(encoding="utf-8")
-                st.info("Loaded `sample_resume.txt` (Distributed Systems Engineer).")
+                st.caption("Loaded `sample_resume.txt` (Distributed Systems Engineer).")
             else:
-                st.warning("sample_resume.txt not found in workspace.")
+                resume_text_to_send = "Senior Backend Engineer with Python, Redis, and High Concurrency experience."
         elif resume_mode == "Upload File":
             uploaded_file = st.file_uploader("Upload Resume (.txt, .md, .pdf)", type=["txt", "md", "pdf"])
             if uploaded_file:
-                # Save uploaded file temporarily for loader
                 temp_dir = Path("scratch/uploads")
                 temp_dir.mkdir(parents=True, exist_ok=True)
                 temp_file = temp_dir / uploaded_file.name
@@ -216,18 +250,70 @@ with st.sidebar:
                 resume_file_to_send = str(temp_file.resolve())
                 st.success(f"Ready: {uploaded_file.name}")
         else:
-            resume_text_to_send = st.text_area("Paste Resume Text", height=150, placeholder="Paste resume plain text here...")
+            resume_text_to_send = st.text_area("Paste Resume Text", height=120)
 
-        ollama_offline = (chosen_provider == "ollama" and not local_models)
-        start_disabled = (not is_online) or ollama_offline
-        if st.button("🚀 Start Interview", type="primary", use_container_width=True, disabled=start_disabled):
-            with st.spinner("Ingesting Resume & GitHub profile... Initializing state machine..."):
+        st.divider()
+
+        st.subheader("3. Job Description Scenarios (Theme 2)")
+        jd_input_mode = st.radio(
+            "JD Scenario Source",
+            ["Preloaded Technical Scenarios", "Custom Role Text"],
+            horizontal=True,
+        )
+        selected_scenarios = None
+        custom_jd_text = None
+
+        if jd_input_mode == "Preloaded Technical Scenarios":
+            scenario_names = [s["title"] for s in DEFAULT_JD_SCENARIOS]
+            picked = st.multiselect(
+                "Select Scenarios for Theme 2",
+                scenario_names,
+                default=scenario_names[:2],
+            )
+            selected_scenarios = [s for s in DEFAULT_JD_SCENARIOS if s["title"] in picked]
+            st.caption(f"{len(selected_scenarios)} scenario(s) queued for JD probing.")
+        else:
+            custom_jd_text = st.text_area(
+                "Paste Role Description / Criteria",
+                height=100,
+                placeholder="Senior Systems Engineer: Requires expertise in distributed caching, telemetry...",
+            )
+
+        st.divider()
+
+        st.subheader("4. 2-Theme Starting Engine")
+        starting_theme_choice = st.radio(
+            "Initial Question Theme (Turn 1)",
+            [
+                "🎲 Auto (50/50 Random Selection per Spec)",
+                "💜 Theme 1: Candidate Profile (Resume/GitHub)",
+                "🎯 Theme 2: Job Description Scenario",
+            ],
+            index=0,
+        )
+
+        if "Theme 1" in starting_theme_choice:
+            chosen_starting_theme = "PROFILE"
+        elif "Theme 2" in starting_theme_choice:
+            chosen_starting_theme = "JD"
+        else:
+            chosen_starting_theme = random.choice(["PROFILE", "JD"])
+
+        start_disabled = not is_online
+        if st.button("🚀 Start Interview Session", type="primary", use_container_width=True, disabled=start_disabled):
+            with st.spinner("Ingesting Dossier & Initializing 2-Theme Hierarchical Engine..."):
                 try:
-                    payload = {
+                    payload: Dict[str, Any] = {
                         "llm_provider": chosen_provider,
                         "model_name": chosen_model,
                         "use_mock_github": use_mock_git,
+                        "starting_theme": chosen_starting_theme,
                     }
+                    if selected_scenarios:
+                        payload["jd_scenarios"] = selected_scenarios
+                    if custom_jd_text:
+                        payload["jd_text"] = custom_jd_text
+
                     clean_gh = github_input.strip()
                     if clean_gh.startswith(("http://", "https://", "github.com/")):
                         payload["github_url"] = clean_gh
@@ -242,7 +328,7 @@ with st.sidebar:
                         st.error("Please provide resume text or upload a file.")
                         st.stop()
 
-                    resp = httpx.post(f"{api_url.rstrip('/')}/session/start", json=payload, timeout=120.0)
+                    resp = httpx.post(f"{api_url.rstrip('/')}/session/start", json=payload, timeout=90.0)
 
                     if resp.status_code == 201:
                         data = resp.json()
@@ -250,9 +336,12 @@ with st.sidebar:
                         st.session_state.status = "active"
                         st.session_state.messages = []
                         st.session_state.covered_refs = []
+                        st.session_state.orchestration = data.get("orchestration")
                         st.session_state.summary = None
 
                         turn_data = data["turn"]
+                        active_theme = data.get("orchestration", {}).get("active_theme") or ("JD" if turn_data.get("source") == "jd" else "PROFILE")
+                        is_bridge = data.get("orchestration", {}).get("is_bridge_turn", False) or turn_data.get("turn_type") == "theme_switch"
                         st.session_state.messages.append({
                             "role": "assistant",
                             "content": turn_data["question"],
@@ -261,6 +350,8 @@ with st.sidebar:
                                 "source": turn_data["source"],
                                 "source_ref": turn_data["source_ref"],
                                 "reasoning_note": turn_data["reasoning_note"],
+                                "theme": active_theme,
+                                "is_bridge": is_bridge,
                             },
                         })
                         if turn_data.get("source_ref"):
@@ -272,6 +363,15 @@ with st.sidebar:
                         st.rerun()
                     else:
                         st.error(f"Error {resp.status_code}: {resp.json().get('detail', resp.text)}")
+                except httpx.TimeoutException:
+                    st.error(
+                        "⏳ **Session Start Timed Out (90s limit reached).**\n\n"
+                        "The LLM provider or GitHub scraper took too long to initialize the first turn.\n\n"
+                        "**Quick Solutions:**\n"
+                        "- **Switch to Mock LLM**: Under '1. Interview Engine & Model' in the sidebar, select **'Mock LLM'** for instant offline testing.\n"
+                        "- **Use Fast Ollama Model**: If using Ollama, ensure a fast model like `llama3.2:latest` is selected.\n"
+                        "- **Enable Mock GitHub**: Check **'Use Mock GitHub Portfolio'** to avoid external network rate limits."
+                    )
                 except Exception as err:
                     st.error(f"Failed to start interview: {err}")
 
@@ -281,7 +381,7 @@ with st.sidebar:
         with col1:
             if st.session_state.status == "active":
                 if st.button("🛑 End Interview", use_container_width=True):
-                    with st.spinner("Concluding interview session..."):
+                    with st.spinner("Concluding session..."):
                         try:
                             resp = httpx.post(
                                 f"{api_url.rstrip('/')}/session/{st.session_state.session_id}/end",
@@ -300,26 +400,51 @@ with st.sidebar:
                 st.session_state.status = "idle"
                 st.session_state.messages = []
                 st.session_state.covered_refs = []
+                st.session_state.orchestration = None
                 st.session_state.summary = None
                 st.rerun()
 
         st.divider()
 
-        # Telemetry & Covered References Inspector
-        st.subheader("Traceability & Memory")
-        st.metric("Total Turns", len([m for m in st.session_state.messages if m["role"] == "assistant"]))
-        st.metric("Covered Topics", len(st.session_state.covered_refs))
+        # Telemetry & Hierarchical Sub-Memory Inspector
+        st.subheader("🧠 Hierarchical Memory Inspector")
+        orch = st.session_state.orchestration or {}
 
-        with st.expander("Tracked References (`covered_refs`)", expanded=False):
-            if not st.session_state.covered_refs:
-                st.caption("No topics registered yet.")
+        active_theme = orch.get("active_theme", "PROFILE")
+        theme_icon = "💜" if active_theme == "PROFILE" else "🎯"
+        st.markdown(f"**Active Theme:** {theme_icon} `{active_theme}`")
+        if orch.get("active_context_id"):
+            st.caption(f"Context: `{orch['active_context_id']}`")
+
+        # Rubric Ladder
+        curr_dim = orch.get("current_rubric_dimension")
+        if curr_dim:
+            st.markdown(f"**Target Rubric Dimension:** `{curr_dim}`")
+
+        with st.expander("Sub-Memories Tree", expanded=False):
+            sub_mems = orch.get("sub_memories", [])
+            if not sub_mems:
+                st.caption("No sub-memories initialized yet.")
             else:
-                for item in st.session_state.covered_refs:
-                    source_icon = "📄" if item["source"] == "resume" else "🐙"
-                    st.markdown(f"**Turn {item.get('turn_index')}** {source_icon} `[{item['source']}]`")
-                    st.caption(f"{item['ref']}")
+                for sm in sub_mems:
+                    badge = "💜 PROFILE" if sm["theme"] == "PROFILE" else "🎯 JD"
+                    st.markdown(f"**{sm['context_id']}** `[{badge}]`")
+                    st.caption(f"Ref: {sm['source_ref']} | Status: `{sm['status']}` ({sm['turn_count']} turns)")
+                    if sm.get("completed_dimensions"):
+                        st.markdown(f"Probed: {', '.join(sm['completed_dimensions'])}")
+                    if sm.get("pending_dimensions"):
+                        st.markdown(f"Pending: {', '.join(sm['pending_dimensions'])}")
+                    st.markdown("---")
 
-        # Full Transcript Download
+        with st.expander("Anti-Duplication Registry", expanded=False):
+            topics = orch.get("globally_covered_topics", [])
+            if topics:
+                for t in topics:
+                    st.markdown(f"- `{t}`")
+            else:
+                st.caption("Registry clean.")
+
+        # Download Audit JSON
         try:
             raw_transcript_resp = httpx.get(
                 f"{api_url.rstrip('/')}/session/{st.session_state.session_id}/transcript",
@@ -338,75 +463,138 @@ with st.sidebar:
 
 
 # --- MAIN CHAT PANEL ---
-st.markdown('<div class="main-header">AI Technical Interview Agent</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">🎙️ AI Technical Interview Agent</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="sub-header">'
-    'Stateful, claim-grounded interviewer with dynamic context switching (Resume ↔ GitHub) and zero RAG.'
+    'Grounding State Machine & 2-Theme Engine (Candidate Profile ↔ Job Description Scenarios) with Zero RAG.'
     '</div>',
     unsafe_allow_html=True,
 )
 
 if st.session_state.status == "idle":
-    st.info("👈 Set up candidate resume and GitHub username in the sidebar and click **'Start Interview'** to begin.")
+    st.info("👈 Configure Candidate Dossier and Target Role (JD) in the sidebar, then click **'Start Interview Session'** to begin.")
+
+# Active Dashboard Header (Live Timer, Theme & Rubric Trackers)
+if st.session_state.status in ("active", "completed") and st.session_state.orchestration:
+    orch = st.session_state.orchestration
+    col_t1, col_t2, col_t3 = st.columns([1.2, 1.2, 1.4])
+
+    with col_t1:
+        min_rem = orch.get("minutes_remaining", 25.0)
+        elapsed = orch.get("elapsed_minutes", 0.0)
+        turns_count = len([m for m in st.session_state.messages if m["role"] == "assistant"])
+        st.metric("⏱️ 25-Min Session Budget", f"{min_rem:.1f} min left", f"Elapsed: {elapsed:.1f} min")
+        # Visual turn progress (max 12 turns)
+        st.progress(min(1.0, turns_count / 12.0), text=f"Turn {turns_count} of 12 (Budget Guardrail)")
+
+    with col_t2:
+        active_theme = orch.get("active_theme", "PROFILE")
+        theme_title = "💜 Theme 1: Candidate Profile" if active_theme == "PROFILE" else "🎯 Theme 2: Target Role JD"
+        st.metric("Active Theme", theme_title)
+        st.caption(f"Focus: `{orch.get('active_context_id', 'General')}`")
+
+    with col_t3:
+        curr_dim = orch.get("current_rubric_dimension", "clarity_of_framing")
+        st.metric("Rubric Depth Ladder", curr_dim or "Complete")
+        st.markdown(
+            '<span class="rubric-pill">1. Framing</span> ➔ '
+            '<span class="rubric-pill">2. Methodology</span> ➔ '
+            '<span class="rubric-pill">3. Trade-offs</span>',
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
 
 # Display Conversation History
 for msg in st.session_state.messages:
     if msg["role"] == "assistant":
         with st.chat_message("assistant", avatar="🧑‍💼"):
-            st.markdown(msg["content"])
-            meta = msg.get("meta")
-            if meta:
-                # Render metadata tags
-                turn_type = meta.get("turn_type", "")
-                source = meta.get("source", "")
-                source_ref = meta.get("source_ref", "")
-                reasoning = meta.get("reasoning_note", "")
+            meta = msg.get("meta") or {}
+            is_bridge = meta.get("is_bridge", False) or meta.get("turn_type") == "theme_switch"
 
-                with st.expander("🔍 Interviewer Reasoning & Metadata", expanded=False):
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.markdown(f"**Turn Intent**: `{turn_type}`")
-                        st.markdown(f"**Source**: `{source}`")
-                    with col_b:
-                        st.markdown(f"**Grounded Reference**: `{source_ref}`")
-                    if reasoning:
-                        st.markdown(f"**Internal Reasoning**: *{reasoning}*")
+            # Render Bridge Question Alert Callout only on actual theme switches
+            if is_bridge:
+                target_th = meta.get("theme") or ("JD" if meta.get("source") == "jd" else "PROFILE")
+                st.markdown(
+                    '<div class="bridge-banner">'
+                    f'<strong>🌉 Seamless Theme Switch ➔ {target_th}:</strong> '
+                    f'Connecting prior project decisions to target scenario <em>"{meta.get("source_ref")}"</em>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown(msg["content"])
+
+            # Metadata Expander
+            with st.expander("🔍 Turn Metadata & Rubric Anchor", expanded=False):
+                col_m1, col_m2 = st.columns(2)
+                with col_m1:
+                    theme_val = meta.get("theme") or ("JD" if meta.get("source") == "jd" else "PROFILE")
+                    badge_class = "badge-profile" if theme_val == "PROFILE" else "badge-jd"
+                    src_raw = meta.get("source", "resume").upper()
+                    src_detail = f" ({src_raw})" if theme_val == "PROFILE" else ""
+                    st.markdown(f"**Theme:** <span class='tag-badge {badge_class}'>{theme_val}{src_detail}</span>", unsafe_allow_html=True)
+                    st.markdown(f"**Turn Type:** `{meta.get('turn_type')}`")
+                with col_m2:
+                    st.markdown(f"**Source Ref:** `{meta.get('source_ref')}`")
+                    if meta.get("reasoning_note"):
+                        st.markdown(f"**Reasoning:** *{meta.get('reasoning_note')}*")
+
     elif msg["role"] == "user":
         with st.chat_message("user", avatar="💻"):
             st.markdown(msg["content"])
 
-# Completion Summary Card
+# Interview Completion Card
 if st.session_state.status == "completed" and st.session_state.summary:
-    st.success("### 🏁 Interview Completed")
+    st.success("### 🏁 Technical Interview Completed")
     summary = st.session_state.summary
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Resume Probes", summary.get("resume_questions_count", 0))
-    c2.metric("GitHub Probes", summary.get("github_questions_count", 0))
-    c3.metric("Skill Anchors", summary.get("skill_anchored_count", 0))
-    c4.metric("Follow-ups", summary.get("follow_up_count", 0))
-    c5.metric("Context Switches", summary.get("context_switch_count", 0))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Resume Inquiries", summary.get("resume_questions_count", 0))
+    c2.metric("GitHub Inquiries", summary.get("github_questions_count", 0))
+    c3.metric("Follow-ups", summary.get("follow_up_count", 0))
+    c4.metric("Context Switches", summary.get("context_switch_count", 0))
 
-    st.markdown("#### Topics Explored:")
+    st.markdown("#### Covered Topics & Scenarios:")
     for topic in summary.get("covered_topics", []):
-        st.markdown(f"- {topic}")
+        st.markdown(f"- `{topic}`")
 
-# Candidate Input Box
+# Candidate Submission Area with Hybrid JEV Evaluator Buttons
 if st.session_state.status == "active":
-    if prompt := st.chat_input("Type your technical answer here..."):
-        # 1. Immediately render candidate answer
-        st.session_state.messages.append({"role": "user", "content": prompt})
+    st.markdown("### Your Response")
+    candidate_answer = st.text_area(
+        "Candidate Answer:",
+        height=100,
+        placeholder="Walk through your architectural trade-offs, code choices, or concurrency patterns...",
+        label_visibility="collapsed",
+    )
 
-        # 2. Call backend answer endpoint
-        with st.spinner("Interviewer is reasoning over your answer and selecting focus..."):
+    col_btn1, col_btn2, col_btn3 = st.columns([1.5, 1.8, 2.0])
+
+    def submit_turn(signal: Optional[str] = None):
+        if not candidate_answer.strip():
+            st.warning("Please enter an answer before submitting.")
+            return
+
+        st.session_state.messages.append({"role": "user", "content": candidate_answer.strip()})
+
+        with st.spinner("Interviewer analyzing response, checking grounding & advancing state machine..."):
             try:
+                body: Dict[str, Any] = {"answer": candidate_answer.strip()}
+                if signal:
+                    body["jev_signal"] = signal
+
                 resp = httpx.post(
                     f"{api_url.rstrip('/')}/session/{st.session_state.session_id}/answer",
-                    json={"answer": prompt},
-                    timeout=120.0,
+                    json=body,
+                    timeout=90.0,
                 )
                 if resp.status_code == 200:
                     data = resp.json()
                     turn_data = data["turn"]
+                    st.session_state.orchestration = data.get("orchestration")
+
+                    active_theme = data.get("orchestration", {}).get("active_theme") or ("JD" if turn_data.get("source") == "jd" else "PROFILE")
+                    is_bridge = data.get("orchestration", {}).get("is_bridge_turn", False) or turn_data.get("turn_type") == "theme_switch"
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": turn_data["question"],
@@ -415,6 +603,8 @@ if st.session_state.status == "active":
                             "source": turn_data["source"],
                             "source_ref": turn_data["source_ref"],
                             "reasoning_note": turn_data["reasoning_note"],
+                            "theme": active_theme,
+                            "is_bridge": is_bridge,
                         },
                     })
                     if turn_data.get("source_ref") and turn_data["turn_type"] != "closing":
@@ -430,5 +620,22 @@ if st.session_state.status == "active":
                     st.rerun()
                 else:
                     st.error(f"Error {resp.status_code}: {resp.json().get('detail', resp.text)}")
+            except httpx.TimeoutException:
+                st.error(
+                    "⏳ **Turn Response Timed Out (90s limit reached).**\n\n"
+                    "The model took longer than 90s to generate a follow-up. Please try submitting again or switch to Mock LLM for rapid testing."
+                )
             except Exception as e:
                 st.error(f"Error submitting answer: {e}")
+
+    with col_btn1:
+        if st.button("💬 Submit Answer (Auto-Evaluate)", type="primary", use_container_width=True):
+            submit_turn(signal=None)
+
+    with col_btn2:
+        if st.button("🔍 Submit & Force Follow-Up", use_container_width=True, help="Simulates JEV FOLLOW_UP to probe deeper along the rubric ladder"):
+            submit_turn(signal="FOLLOW_UP")
+
+    with col_btn3:
+        if st.button("🌉 Submit & Force Theme Switch", use_container_width=True, help="Simulates JEV SWITCH_CONTEXT to trigger a seamless bridge question between PROFILE and JD"):
+            submit_turn(signal="SWITCH_CONTEXT")

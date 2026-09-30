@@ -12,10 +12,13 @@ class TurnMeta(BaseModel):
         "resume_claim",
         "github_project",
         "skill_anchored",
+        "role_scenario",
         "follow_up",
         "context_switch",
+        "theme_switch",
         "closing",
     ] = "resume_claim"
+    theme: Optional[Literal["PROFILE", "JD"]] = None
     reasoning_note: Optional[str] = None
 
     @field_validator("turn_type", mode="before")
@@ -39,9 +42,14 @@ class TurnMeta(BaseModel):
             "skills": "skill_anchored",
             "skill_anchored": "skill_anchored",
             "skill_anchor": "skill_anchored",
+            "role_scenario": "role_scenario",
+            "jd_scenario": "role_scenario",
+            "scenario": "role_scenario",
             "followup": "follow_up",
             "follow_up": "follow_up",
-            "switch": "context_switch",
+            "switch": "theme_switch",
+            "theme_switch": "theme_switch",
+            "bridge": "theme_switch",
             "context_switch": "context_switch",
             "closing": "closing",
             "close": "closing",
@@ -145,6 +153,14 @@ class SessionBudget(BaseModel):
         return (datetime.now(timezone.utc) - self.start_time).total_seconds()
 
     @property
+    def elapsed_minutes(self) -> float:
+        return self.elapsed_seconds / 60.0
+
+    @property
+    def minutes_remaining(self) -> float:
+        return max(0.0, (self.max_duration_seconds - self.elapsed_seconds) / 60.0)
+
+    @property
     def is_closing_time(self) -> bool:
         return self.elapsed_seconds >= 1320  # 22 minutes cutoff
 
@@ -182,6 +198,8 @@ class SessionState(BaseModel):
     sub_memories: Dict[str, ContextSubMemory] = Field(default_factory=dict)
     recent_dialogue_window: List[TurnRecord] = Field(default_factory=list)
     globally_covered_topics: List[str] = Field(default_factory=list)
+    jd_scenarios: Optional[List[Dict[str, Any]]] = None
+    jd_text: Optional[str] = None
 
     # Provider and model tracking
     llm_provider: Optional[Literal["openrouter", "ollama", "mock"]] = None
@@ -227,23 +245,28 @@ class SessionState(BaseModel):
             "resume_claim",
             "github_project",
             "skill_anchored",
+            "role_scenario",
             "follow_up",
             "context_switch",
+            "theme_switch",
             "closing",
         ],
-        source: Optional[Literal["resume", "github"]] = None,
+        source: Optional[Literal["resume", "github", "jd"]] = None,
         source_ref: Optional[str] = None,
         reasoning_note: Optional[str] = None,
         rubric_dimension: Optional[str] = None,
+        theme: Optional[Literal["PROFILE", "JD"]] = None,
     ) -> TranscriptTurn:
         """Appends interviewer's question to transcript and updates hierarchical memory."""
         self.turn_count += 1
         cleaned_question = question.strip()
+        assigned_theme = theme or self.orchestration.active_theme
         meta = TurnMeta(
             source=source,
             source_ref=source_ref,
             turn_type=turn_type,
             reasoning_note=reasoning_note,
+            theme=assigned_theme,
         )
         turn = TranscriptTurn(
             role="interviewer",
